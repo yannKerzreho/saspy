@@ -1,35 +1,8 @@
-"""
-model.py — SASModel: composable (projector, basis_p, basis_q) JAX pytree.
+"""SASModel: composable (projector, basis_p, basis_q) JAX pytree.
 
-SASModel wires Layer 1 (InputProjector) to two independent Layer 2 bases:
-  - basis_p: governs the transition matrix A_t (algebraic structure for scan)
+Wires Layer 1 (InputProjector) to two independent Layer 2 bases:
+  - basis_p: governs the transition matrix A_t
   - basis_q: governs the input-drive vector q_t
-
-This decoupling allows mixing basis types, e.g. a polynomial transition with
-a Random Fourier Feature drive, or identical bases sharing the same structure.
-
-Usage
------
-# Identical bases (equivalent to old single-basis API)
-model = SASModel(
-    projector = InputProjector(d=1, n_drivers=K),
-    basis_p   = LRUBlockPoly(n_blocks=K),
-    basis_q   = LRUBlockPoly(n_blocks=K),
-)
-
-# Decoupled: polynomial transitions + RFF input drive
-model = SASModel(
-    projector = InputProjector(d=10, n_drivers=K),
-    basis_p   = LRUBlockPoly(n_blocks=K),
-    basis_q   = RandomFourierBasis(n_blocks=K, features_per_block=2),
-)
-
-# Trivial projector — univariate diagonal model
-model = SASModel(
-    projector = InputProjector.trivial(n_drivers=N),
-    basis_p   = DiagonalPoly(n=N, p_degree=1),
-    basis_q   = DiagonalPoly(n=N, q_degree=1),
-)
 """
 
 import jax

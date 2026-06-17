@@ -1,31 +1,13 @@
-"""
-projector.py — Static random input projection (Layer 1).
+"""Static random input projection (Layer 1).
 
-Maps the raw input sequence z of shape (T, d) to a projected sequence
+Maps the input sequence z of shape (T, d) to a projected sequence
 z_tilde of shape (T, n_drivers) via a fixed random matrix W_in:
 
     z_tilde = z @ W_in        W_in: (d, n_drivers)
 
-Design rules
-------------
-* d = 1  →  W_in is always **dense** (no sparsity).  A dense random map
-  ensures each driver z_tilde[i] = W_in[0, i] · z_t is a uniquely scaled
-  copy of the scalar input — critical for avoiding rank collapse in
-  DiagonalPoly and block bases alike.
-
-* d > 1  →  supports configurable column sparsity (fraction of non-zero
-  entries per column).
-
-* Column normalisation: each column of W_in is scaled to have unit L2 norm,
-  which ensures Var(z_tilde[i]) ≈ 1 when d = 1 (matching the variance
-  assumptions baked into the Q-weight initialisation).
-
-Trivial projector — backward-compatible "broadcast scalar"
----------------------------------------------------------
-``InputProjector.trivial(n_drivers)`` sets W_in = ones(1, n_drivers).
-This broadcasts the scalar z_t identically to every driver:
-    z_tilde_t[i] = z_t  ∀ i
-reproducing the classic univariate SAS reservoir exactly.
+For d == 1, W_in = ones(1, n_drivers) so every driver sees the same
+scalar input; diversity comes from the basis P/Q weights.
+For d > 1, W_in is a randomly drawn, L2-column-normalised sparse matrix.
 """
 
 import jax
@@ -111,31 +93,11 @@ class InputProjector:
     # ── factory ──────────────────────────────────────────────────────────────
 
     def initialize(self, key) -> "InputProjector":
-        """
-        Return a new InputProjector with W initialised appropriately for d.
+        """Return a new InputProjector with W initialised.
 
-        d == 1  →  trivial: W = ones(1, n_drivers).
-            All drivers broadcast the same scalar input.  Diversity comes
-            entirely from the basis P/Q weights (different base eigenvalues,
-            input-drive gains, etc.).  Using a random W for d=1 is redundant:
-            P[1,i] × W[0,i] × z_t is just a re-parameterised P[1,i], adding
-            noise on top of existing diversity without structural benefit.
-
-        d > 1  →  Gaussian → 0/1 mask → L2 column-normalise.
-            Step 1  W ~ N(0, 1)              random Gaussian, shape (d, n_drivers)
-            Step 2  W *= Bernoulli(density)  zero-out entries with prob (1−density)
-            Step 3  W /= ||W||_col           each column rescaled to unit L2 norm
-
-            W_in's sole job is to assign each driver a unique direction in the
-            d-dimensional input space.  Scale diversity is owned by P/Q weights.
-
-            density=1.0  →  dense; mask is trivially all-ones.  Each driver
-                            extracts a random unit-direction projection of all
-                            d channels (~45% cross-channel mixing for d=3).
-            density≈1/d  →  sparse; ~1 non-zero per column.  After L2 norm
-                            each column is a signed-unit channel selector —
-                            equivalent to a random channel-assignment matrix.
-            Columns zeroed entirely by the mask remain zero (dead drivers).
+        d == 1: W = ones(1, n_drivers) — all drivers broadcast the same scalar.
+        d > 1:  W ~ N(0,1), masked to `density` non-zeros per column, then
+                L2-normalised so each column is a unit-direction projection.
         """
         d         = self.d
         n_drivers = self.n_drivers
@@ -147,29 +109,22 @@ class InputProjector:
             obj.W = jnp.eye(d, dtype=jnp.float32)
             return obj
 
-        # ── d == 1: trivial broadcast ─────────────────────────────────────
         if d == 1:
             obj   = InputProjector(d, n_drivers, self.density, self.seed, self.mixing_strategy)
             obj.W = jnp.ones((1, n_drivers), dtype=jnp.float32)
             return obj
 
-        # ── d > 1: build W via selected mixing strategy, then L2-normalise ──
         k_W, k_mask = jax.random.split(key)
         W_raw = jax.random.normal(k_W, (d, n_drivers), dtype=jnp.float32)
 
         if self.mixing_strategy == "hybrid":
-            # Guaranteed Base + Sparse Overlay — no dead neurons possible.
-            # 1. Base mask: strict cyclic column→row assignment (each column
-            #    gets exactly one guaranteed non-zero entry).
-            cols         = jnp.arange(n_drivers)
+            # Cyclic base mask guarantees ≥1 non-zero per column; random overlay adds mixing.
+            cols          = jnp.arange(n_drivers)
             assigned_rows = cols % d
-            mask_base    = jnp.zeros((d, n_drivers), dtype=bool).at[assigned_rows, cols].set(True)
-            # 2. Sparse overlay: random cross-channel mixing at self.density.
-            mask_rand = jax.random.uniform(k_mask, (d, n_drivers)) < self.density
-            # 3. Combine: base guarantees ≥1 non-zero; overlay adds mixing.
-            mask = mask_base | mask_rand
+            mask_base     = jnp.zeros((d, n_drivers), dtype=bool).at[assigned_rows, cols].set(True)
+            mask_rand     = jax.random.uniform(k_mask, (d, n_drivers)) < self.density
+            mask          = mask_base | mask_rand
         else:
-            # "pure_random": original Bernoulli mask — may produce dead columns.
             mask = jax.random.uniform(k_mask, (d, n_drivers)) < self.density
 
         W = W_raw * mask
@@ -187,11 +142,11 @@ class InputProjector:
 
     def project(self, z: jnp.ndarray) -> jnp.ndarray:
         """z: (T, d) → z_tilde: (T, n_drivers)."""
-        return z @ self.W                     # standard (T, d) @ (d, n_drivers)
+        return z @ self.W
 
     def project_single(self, z_t: jnp.ndarray) -> jnp.ndarray:
         """z_t: (d,) → z_tilde_t: (n_drivers,)."""
-        return jnp.dot(z_t, self.W)           # (d,)·(d, n_drivers) → (n_drivers,)
+        return jnp.dot(z_t, self.W)
 
     # ── pytree ───────────────────────────────────────────────────────────────
 

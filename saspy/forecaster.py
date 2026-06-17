@@ -1,22 +1,13 @@
-"""
-forecaster.py — SASForecaster: streaming time-series forecaster.
+"""SASForecaster: streaming time-series forecaster.
 
 Wraps SASModel + ridge regression into the BaseForecaster protocol.
 
-    fit(history, horizons, context=None)
-        Initialise model, run scan, fit ridge per horizon.
-        Pass `context` (T, d) to drive the reservoir with a multivariate
-        signal while forecasting a univariate target (`history`).
-        When context is None, history itself (d=1) drives the reservoir.
+    fit(history, horizons, context=None) → run scan, fit ridge readout(s).
+    update(x)                            → single streaming step.
+    predict(h)                           → h-step forecast, un-z-scored.
+    transform(history, context=None)     → (T, N) reservoir states.
 
-    update(x)   → single streaming step; x is scalar or (d,) vector.
-    predict(h)  → s_last · W[h], un-z-scored to history scale.
-    transform(history, context=None) → (T, N) raw reservoir states.
-
-Pre-processing contract
------------------------
-The forecaster z-scores internally.  Any other transformation (log,
-differencing, deseasonalisation) is the caller's responsibility.
+Z-scoring is handled internally; other preprocessing is the caller's responsibility.
 """
 
 from __future__ import annotations
@@ -41,17 +32,9 @@ from .ridge      import (
 
 @functools.partial(jax.jit, static_argnames=('n_steps',))
 def _autoreg_rollout(model, s0, W1, n_steps: int):
-    """
-    Advance the SAS reservoir n_steps autoregressively.
+    """Advance the reservoir n_steps autoregressively; non-destructive.
 
-    At each step the readout W1 is applied to the current state to produce
-    the predicted z-scored input for the next step.  Non-destructive: only
-    the final state is returned; the caller's s_last is never mutated.
-
-    model   : SASModel pytree (initialised)
-    s0      : (N,) starting state
-    W1      : (N,) or (N, D) one-step ridge readout (z-score space)
-    n_steps : static int — 0 returns s0 unchanged (lax.scan identity)
+    n_steps=0 returns s0 unchanged (lax.scan with length=0 is the identity).
     """
     def body(s, _):
         y_z = s @ W1                                   # () or (D,)
@@ -156,15 +139,10 @@ class SASForecaster(BaseForecaster):
                    When None, history is used as the sole context (d=1).
         """
         history = np.asarray(history, dtype=np.float64)
-        if history.ndim == 1:
-            pass                         # keep as (T,)
-        elif history.ndim == 2:
-            pass                         # keep as (T, D)
-        else:
+        if history.ndim not in (1, 2):
             raise ValueError(f"history must be 1-D or 2-D, got shape {history.shape}")
         T = history.shape[0]
 
-        # 1. scale target — scalar params for 1-D, (D,) arrays for 2-D
         if history.ndim == 2:
             if self.scale_input:
                 self._mu    = history.mean(axis=0)                   # (D,)
@@ -180,7 +158,6 @@ class SASForecaster(BaseForecaster):
                 self._mu, self._sigma = 0.0, 1.0
             Y_z = self._zscore(history, self._mu, self._sigma).astype(np.float32)
 
-        # 2. prepare reservoir input z: (T, d)
         if context is not None:
             ctx = np.asarray(context, dtype=np.float64)
             if ctx.ndim == 1:
@@ -201,27 +178,23 @@ class SASForecaster(BaseForecaster):
             self._ctx_sigma = None
             ctx_z = Y_z[:, None] if Y_z.ndim == 1 else Y_z  # (T,1) or (T,D)
 
-        # 3. initialise model (projector + basis)
         key         = jax.random.PRNGKey(self.seed)
         self._model = self._model.initialize(key)
 
-        # 4. run reservoir
-        z      = jnp.array(ctx_z)                              # (T, d)
+        z      = jnp.array(ctx_z)
         s0     = jnp.zeros(self._model.n, dtype=jnp.float32)
         if getattr(self._model.basis_p, 'training_mode', 'parallel') == 'sequential':
             states, s_last = _stream_scan(self._model, s0, z)
         else:
             states, s_last = _forward(self._model, z, s0, self.chunk_size)
 
-        states_np         = np.asarray(states, dtype=np.float32)
-        self._s_last      = np.asarray(s_last, dtype=np.float32)
-        self._states_train = states_np   # cached for multi-output readout fitting
+        states_np          = np.asarray(states, dtype=np.float32)
+        self._s_last       = np.asarray(s_last, dtype=np.float32)
+        self._states_train = states_np
 
-        # 5. ridge per horizon
-        # autoreg mode only needs h=1; other horizons are ignored.
         N  = self._model.n
         wo = self.washout
-        self._W        = {}
+        self._W         = {}
         self.alpha_log_: dict[int, float] = {}
 
         fit_horizons = [1] if self.mode == 'autoreg' else horizons
@@ -229,7 +202,6 @@ class SASForecaster(BaseForecaster):
             S = states_np[wo: T - h]
             Y = Y_z      [wo + h: T]
             if len(S) < 5:
-                # shape (N,) for 1-D target, (N, D) for multi-output
                 self._W[h] = np.zeros((N,) + Y_z.shape[1:], dtype=np.float32)
                 continue
             alpha              = _ridge_cv(S, Y, self.n_cv_folds, self.alphas)

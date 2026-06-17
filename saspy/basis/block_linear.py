@@ -1,22 +1,10 @@
-"""
-block_linear.py — General B×B block-diagonal polynomial basis.
+"""General B×B block-diagonal polynomial basis (n_drivers = K, N = K·B).
 
-Each of the K blocks couples B state dimensions through a full B×B matrix,
-mixing all B components of the local state with each other ("mixing different
-z_tilde dimensions" via the richer matrix structure):
+Generalises LRUBlockPoly to arbitrary block size B with orthogonal-matrix
+initialisation instead of the fixed rotation structure:
 
-    A_k(z_tilde_t[k]) = Σ_d P_weights[d, k] · z_tilde_t[k]^d    (B, B)
-
-This generalises LRUBlockPoly (fixed B=2, rotation init) to arbitrary B with
-orthogonal-matrix initialisation.
-
-Projector → basis interface:
-  n_drivers = K  (one scalar z_tilde[k] per block)
-  N         = K · B  (total reservoir size)
-
-BlockLinearPoly vs LRUBlockPoly:
-  - LRU: B=2, rotation init, designed for oscillatory dynamics
-  - BlockLinear: general B, orthogonal init, richer intra-block coupling
+    A_k(z_tilde[k]) = Σ_d P_weights[d, k] · z_tilde[k]^d   shape (B, B)
+    q_k(z_tilde[k]) = Σ_d Q_weights[d, k] · z_tilde[k]^d   shape (B,)
 """
 
 import jax
@@ -95,27 +83,22 @@ class BlockLinearPoly(BaseBasis):
 
         key_P0, key_Pmod, key_Q = jax.random.split(key, 3)
 
-        # ── Step 1: degree-0 base matrices (orthogonal × spectral_norm) ──
-        keys_P0   = jax.random.split(key_P0, K)
+        keys_P0 = jax.random.split(key_P0, K)
 
         def _rand_orth(k):
-            A      = jax.random.normal(k, (B, B))
-            Q, R   = jnp.linalg.qr(A)
-            signs  = jnp.sign(jnp.diag(R))      # ensure det ≥ 0
+            A     = jax.random.normal(k, (B, B))
+            Q, R  = jnp.linalg.qr(A)
+            signs = jnp.sign(jnp.diag(R))
             return Q * signs[None, :]
 
-        P0 = jax.vmap(_rand_orth)(keys_P0) * sn  # (K, B, B)
+        P0 = jax.vmap(_rand_orth)(keys_P0) * sn   # (K, B, B)
 
-        # ── Step 2: Q weights ─────────────────────────────────────────────
         gamma = (1.0 - sn ** 2) ** 0.5
-        dc    = q_degree_correction(self.q_degree, self.taylor_decay)  # (q+1,)
+        dc    = q_degree_correction(self.q_degree, self.taylor_decay)
         Q_raw = jax.random.normal(key_Q, (self.q_degree + 1, K, B)) / (B ** 0.5)
         Q     = Q_raw * dc[:, None, None] * gamma
-        # Q shape: (q_degree+1, K, B)
 
-        # ── Step 3: degrees 1+ — per-degree Volterra modulation ──────────
-        # Degree d gets budget (1-sn)·0.9 / (2^(d-1) · scale_ref^d) so that
-        # ‖M_d‖ · scale_ref^d ≤ (1-sn)·0.9 / 2^(d-1) with geometric decay.
+        # Per-degree Volterra budget: ‖M_d‖ · scale_ref^d ≤ (1-sn)·0.9 / 2^(d-1)
         scale_ref = self._budget_ref()
 
         if self.p_degree >= 1:

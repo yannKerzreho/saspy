@@ -1,26 +1,11 @@
-"""
-lru_block.py — LRU-inspired 2×2 rotation-block polynomial basis.
+"""LRU-inspired 2×2 rotation-block polynomial basis (n_drivers = K, N = 2K).
 
-Each of the K blocks is a 2×2 real rotation block — the real representation of
-a complex eigenvalue λ_k = r_k · exp(i·θ_k).  This is equivalent to DiagonalPoly
-but with complex (conjugate-pair) eigenvalues, enabling oscillatory dynamics.
+Each block k holds a 2×2 rotation matrix with complex eigenvalue
+λ_k = r_k · exp(i·θ_k), enabling oscillatory dynamics:
 
-Projector → basis interface:
-  n_drivers = K  (one scalar z_tilde[k] per block)
-
-Recurrence for block k:
-  A_k(z_tilde_t[k]) = Σ_d P_weights[d, k] · z_tilde_t[k]^d    shape (2, 2)
-  q_k(z_tilde_t[k]) = Σ_d Q_weights[d, k] · z_tilde_t[k]^d    shape (2,)
-
-  s_t[k·2 : k·2+2] = A_k · s_{t-1}[k·2 : k·2+2] + q_k
-
-Degree-0 term (the autonomous rotation):
-  P_weights[0, k] = r_k · [[cos θ_k, −sin θ_k], [sin θ_k, cos θ_k]]
-  This is the constant base matrix; when z_tilde[k]=0, A_k = P_weights[0, k].
-
-Higher-degree terms add input-modulated Volterra interactions.
-
-N = 2·K  (total reservoir size).
+    A_k(z_tilde[k]) = Σ_d P_weights[d, k] · z_tilde[k]^d   shape (2, 2)
+    q_k(z_tilde[k]) = Σ_d Q_weights[d, k] · z_tilde[k]^d   shape (2,)
+    s_t[2k:2k+2]    = A_k · s_{t-1}[2k:2k+2] + q_k
 """
 
 import jax
@@ -109,10 +94,9 @@ class LRUBlockPoly(BaseBasis):
 
         key_theta, key_mod, key_q = jax.random.split(key, 3)
 
-        # ── Step 1: degree-0 rotation blocks ─────────────────────────────
         log_taus = jnp.linspace(jnp.log(self.tau_min), jnp.log(self.tau_max), K)
-        taus     = jnp.exp(log_taus)               # (K,)
-        r        = jnp.exp(-1.0 / taus)            # (K,) ∈ (0, 1)
+        taus     = jnp.exp(log_taus)
+        r        = jnp.exp(-1.0 / taus)   # (K,) ∈ (0, 1)
 
         K_diag = int(round(self.frac_diagonal * K))
         K_osc  = K - K_diag
@@ -128,19 +112,14 @@ class LRUBlockPoly(BaseBasis):
             s = jnp.sin(th_k)
             return r_k * jnp.array([[c, -s], [s, c]])
 
-        P0 = jax.vmap(_rot)(r, theta)               # (K, 2, 2)
+        P0 = jax.vmap(_rot)(r, theta)   # (K, 2, 2)
 
-        # ── Step 2: Q weights with LRU gamma normalisation ───────────────
-        gamma = jnp.sqrt(1.0 - r ** 2)  # (K,)
-
-        dc    = q_degree_correction(self.q_degree, self.taylor_decay)  # (q+1,)
+        gamma = jnp.sqrt(1.0 - r ** 2)
+        dc    = q_degree_correction(self.q_degree, self.taylor_decay)
         Q_raw = jax.random.normal(key_q, (self.q_degree + 1, K, _B)) / jnp.sqrt(2.0)
         Q     = Q_raw * dc[:, None, None] * gamma[None, :, None]
-        # Q shape: (q_degree+1, K, 2)
 
-        # ── Step 3: degrees 1+ — per-degree Volterra modulation ──────────
-        # Per block k, degree d: budget (1−r_k)·0.9 / (2^(d−1) · scale_ref^d)
-        # so that ‖M_d[k]‖ · scale_ref^d ≤ (1−r_k)·0.9 / 2^(d−1).
+        # Per-degree Volterra budget: ‖M_d[k]‖ · scale_ref^d ≤ (1−r_k)·0.9 / 2^(d−1)
         scale_ref = self._budget_ref()
 
         if self.p_degree >= 1:

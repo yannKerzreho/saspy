@@ -1,30 +1,10 @@
-"""
-random_fourier.py — RandomFourierBasis: RFF Q + DiagonalPoly P, one feature per unit.
+"""Random Fourier Feature Q + DiagonalPoly P basis (n_drivers = N).
 
-Each of the N units has its own dedicated scalar driver z_tilde[k] from the projector
-(n_drivers = N, same interface as DiagonalPoly) and its own frequency Omega[k].
+Q side: q[k] = sqrt(2) · cos(Omega[k] · z_tilde[k] + Phase[k])
+P side: A_t[k] = Σ_d P_weights[d, k] · z_tilde[k]^d  (clipped to (−1, 1))
 
-Q side  (eval_q / batch_eval_q)
---------------------------------
-    q[k] = sqrt(2) · cos(Omega[k] · z_tilde[k] + Phase[k])
-
-With bandwidth_min / bandwidth_max, Omega[k] is drawn from a log-spaced mixture of
-bandwidths:  Omega[k] ~ N(0, sigma_k²)  where sigma_k = 1 / bw_k and
-bw_k = exp(linspace(log(bw_min), log(bw_max), N)).  This creates a frequency
-continuum: low-bandwidth units capture high-frequency / fast features, while
-high-bandwidth units capture slow / smooth features.
-
-Without bandwidth_min / bandwidth_max, all units share the same single bandwidth.
-
-P side  (eval_p / batch_eval_p)
---------------------------------
-Exact DiagonalPoly polynomial on z_tilde:
-    A_t[k] = Σ_d P_weights[d, k] · z_tilde[k]^d        clipped to (−1, 1)
-
-Usage
------
-    basis = RandomFourierBasis(n=N, bandwidth_min=0.1, bandwidth_max=10.0, p_degree=2)
-    model = SASModel(InputProjector.trivial(n_drivers=N), basis, basis)
+When bandwidth_min/max are set, Omega[k] is drawn from a log-spaced frequency
+continuum, creating a multi-scale kernel approximation.
 """
 
 import jax

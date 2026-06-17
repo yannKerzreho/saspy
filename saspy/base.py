@@ -1,22 +1,15 @@
-"""Abstract base for all univariate forecasters."""
+"""Abstract base for streaming forecasters."""
 from abc import ABC, abstractmethod
 import numpy as np
 
 
 class BaseForecaster(ABC):
     """
-    Streaming-friendly univariate forecaster protocol.
+    Streaming forecaster protocol.
 
-    Contract
-    --------
-    fit(history, horizons)  : calibrate on 1-D numpy array (T,).
-    update(x)               : ingest one new scalar; update state without refit.
-    predict(h)              : scalar point forecast h steps ahead, in the same
-                              scale as the input.
-
-    Any preprocessing other than z-scoring (log-transform, differencing,
-    residualisation, …) is the caller's responsibility — feed the already-
-    transformed series to ``fit``.
+    fit(history, horizons)  : calibrate on a (T,) array.
+    update(x)               : ingest one new observation without refitting.
+    predict(h)              : h-step-ahead point forecast in the input scale.
     """
 
     @abstractmethod

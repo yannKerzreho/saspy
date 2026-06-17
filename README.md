@@ -1,5 +1,7 @@
 # saspy
 
+![Benchmark](benchmarks/benchmark.png)
+
 SAS (Sate Affine Systems) reservoir computing for univariate time-series forecasting.
 
 The reservoir state evolves as a polynomial recurrence

@@ -139,24 +139,7 @@ def _stream_scan(model, s0, z_seq):
     """
     Sequential streaming via lax.scan — single JIT call for T steps.
 
-    Equivalent to calling _step_once T times in a Python loop, but
-    runs entirely inside a single compiled XLA call, eliminating the
-    per-step Python→XLA dispatch overhead (~4 µs/call on CPU).
-
-    Use this when the full test sequence is available upfront (e.g. for
-    benchmarking or batch evaluation).  Use _step_once for true online
-    streaming where you must predict between observations.
-
-    Parameters
-    ----------
-    model  : SASModel pytree (initialised)
-    s0     : (N,) initial state
-    z_seq  : (T, d) input sequence, float32
-
-    Returns
-    -------
-    all_states : (T, N)   state after each input step
-    s_last     : (N,)     final state  (= all_states[-1])
+    model : SASModel pytree, s0 : (N,), z_seq : (T, d) → (all_states (T, N), s_last (N,))
     """
     def body(s, z_t):
         s_new = model.step(z_t, s)

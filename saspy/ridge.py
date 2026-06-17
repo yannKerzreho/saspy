@@ -1,25 +1,10 @@
-"""
-ridge.py — Shared ridge regression utilities.
+"""Ridge regression utilities.
 
-Functions
----------
-ridge_cv_select      : rolling-window CV → best alpha.
-ridge_fit            : fit with a fixed alpha.
-ridge_cv             : select + fit in one call (standard ridge).
-ridge_cv_grouped     : block-diagonal ridge CV (one alpha per feature group).
-ridge_fit_grouped    : block-diagonal ridge fit.
-
-Optimisations
--------------
-• Gram matrix (X.T @ X) is precomputed *once per fold*, outside the alpha
-  loop.  Previously it was rebuilt O(n_folds × n_alphas) times.
-
-• For uniform penalty (no penalty_mask): eigendecomposition of the fold
-  Gram is computed once per fold.  Each alpha then costs O(val_size·n)
-  for the residual — vs O(n³) for a fresh solve.
-
-• For non-uniform penalty: Gram precomputed per fold; diagonal modified
-  O(n) per alpha before each solve.
+ridge_cv_select   : rolling-window CV → best alpha.
+ridge_fit         : fit with a fixed alpha.
+ridge_cv          : select + fit in one call.
+ridge_cv_grouped  : block-diagonal CV (one alpha per feature group).
+ridge_fit_grouped : block-diagonal ridge fit.
 """
 
 from __future__ import annotations
@@ -58,13 +43,8 @@ def ridge_fit(
     penalty_mask : (n,) per-feature multipliers for α.
                    None → standard ridge (R = I).
 
-    Note: X and y are cast to float64 before the Gram matrix is formed.
-    Reservoir states often arrive as float32 with amplitudes up to O(10–20);
-    forming X^T X in float32 introduces rounding errors of magnitude
-    ~max(X)² × ε₃₂ ≈ 400 × 1e-7 ≈ 4e-5.  That is larger than typical
-    CV-selected alpha values (1e-4 – 1e-2), causing numerically negative
-    eigenvalues and wildly wrong solutions.  float64 arithmetic keeps the
-    Gram matrix positive-semi-definite to machine precision.
+    X and y are cast to float64: float32 Gram matrices develop negative
+    eigenvalues for large-amplitude reservoir states, corrupting the solve.
     """
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -81,17 +61,12 @@ def ridge_cv_select(
     alphas:       list | None = None,
     penalty_mask: np.ndarray | None = None,
 ) -> float:
-    """
-    Rolling-window CV to select the best ridge alpha.
+    """Rolling-window CV to select the best ridge alpha.
 
-    y may be 1-D (T,) or 2-D (T, D).  When 2-D, np.mean(err**2) averages
-    the MSE across all samples and output channels simultaneously — no loop
-    over D is required.
+    y may be 1-D (T,) or 2-D (T, D).
     """
     if alphas is None:
         alphas = ALPHAS
-    # Cast to float64 for the same reason as ridge_fit: float32 Gram matrices
-    # develop negative eigenvalues for large-amplitude reservoir states.
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     T, n     = X.shape

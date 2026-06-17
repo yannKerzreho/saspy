@@ -1,0 +1,95 @@
+benchmark:
+  washout:       500
+  chunk_size:    8     # for SAS parrallel scan
+  vpt_threshold: 0.4
+  n_seed:        10
+  auto_clip_z:   5.0   # clips SAS z-scored predictions to ±5σ after VPT to prevent SWD blow-up
+
+dgps:
+  n_train: 5000
+  n_test:  2000
+  stride:  2000
+
+  mackey_glass:
+    loader:  mackey_glass
+    label:   "Mackey-Glass"
+
+  mso8:
+    loader:  mso8
+    label:   "MSO-8"
+
+  logistic_map:
+    loader:  logistic_map
+    label:   "Logistic Map"
+
+  henon_map:
+    loader:   henon_map
+    channels: [0, 1]
+    label:    "Hénon Map"
+
+  lorenz:
+    loader:   lorenz
+    channels: [0, 1, 2]
+    label:    "Lorenz"
+    lyapunov_time_steps: 37
+
+  rossler:
+    loader:   rossler
+    channels: [0, 1, 2]
+    label:    "Rössler"
+
+  multiscroll:
+    loader:   multiscroll
+    channels: [0, 1, 2]
+    label:    "Multiscroll"
+
+  doublescroll:
+    loader:   doublescroll
+    channels: [0, 1, 2]
+    label:    "Doublescroll"
+
+  lorenz96_5:
+    loader:   lorenz96
+    channels: [0, 1, 2, 3, 4]
+    label:    "Lorenz96-5"
+    args:
+      h: 0.1
+      N: 5
+
+models:
+
+  esn:
+    type:   esn
+    params:
+      units: 500
+      lr:    0.25
+      sr:    1.1
+      input_scaling: 0.5
+    label:  "ESN"
+
+  p2q3_free:
+    type: sas
+    projector: {density: 0.1, strategy: hybrid}
+    basis:
+      type: DiagonalPoly
+      params:
+        n:          500
+        p_degree:   2
+        q_degree:   3
+        max_input:  null
+        budget_ref: 1.0
+    label: "SAS Diag"
+    color: "#2171b5"
+
+  rff_free:
+    type: sas
+    projector: {density: 0.1, strategy: hybrid}
+    basis:
+      type: RandomFourierBasis
+      params:
+        n:          500
+        bandwidth:  0.5
+        p_degree:   1
+        max_input:  null
+        budget_ref: 1.0
+    label: "SAS RFF"

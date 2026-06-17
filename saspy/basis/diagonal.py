@@ -1,22 +1,10 @@
-"""
-diagonal.py — Scalar-per-unit diagonal polynomial basis.
+"""Scalar-per-unit diagonal polynomial basis (n_drivers = N).
 
-Every reservoir unit i gets its own unique scalar driver z_tilde[i] from the
-projector.  The recurrence for unit i is:
+Each unit i has its own scalar driver z_tilde[i] and independent P/Q weights:
 
-    s_t[i] = p(z_tilde_t[i])[i] · s_{t-1}[i] + q(z_tilde_t[i])[i]
-
-where p and q are degree polynomials evaluated via a batched einsum:
-
-    feats[d, i] = z_tilde_t[i]^d           shape (p_degree+1, N)
-    A_t[i]      = Σ_d P_weights[d, i] · z_tilde_t[i]^d   shape (N,)  clipped to (−1,1)
-    q_t[i]      = Σ_d Q_weights[d, i] · z_tilde_t[i]^d   shape (N,)
-
-n_drivers = N  (projector maps d → N; each unit gets its own scalar feature)
-
-Trivial projector (W_in = ones(1, N)) recovers the old "broadcast scalar"
-behaviour: z_tilde_t[i] = z_t for every i, reproducing the classic SAS univariate
-reservoir exactly.
+    A_t[i] = Σ_d P_weights[d, i] · z_tilde[i]^d   (clipped to (−1, 1))
+    q_t[i] = Σ_d Q_weights[d, i] · z_tilde[i]^d
+    s_t[i] = A_t[i] · s_{t-1}[i] + q_t[i]
 """
 
 import jax
@@ -95,13 +83,11 @@ class DiagonalPoly(BaseBasis):
         keys   = jax.random.split(key, n_keys)
         ki     = 0
 
-        # ── P_weights: (p_degree+1, N) ────────────────────────────────────
-        # Degree-0: base eigenvalues uniformly in (−sn, sn)
         p0 = (jax.random.uniform(keys[ki], (N,)) * 2 - 1) * sn
         ki += 1
         p_rows = [p0]
 
-        # Degrees 1+: Volterra modulation — Taylor-shrunk budget per degree
+        # Per-degree Volterra budget: ‖P_d‖ · scale_ref^d ≤ headroom / 2^d
         headroom  = jnp.maximum(1.0 - jnp.abs(p0) - 0.01, 0.0)
         budget    = headroom * 0.5
         scale_ref = self._budget_ref()
@@ -110,11 +96,10 @@ class DiagonalPoly(BaseBasis):
             raw   = jax.random.normal(keys[ki], (N,))
             p_rows.append(jnp.clip(raw, -1.0, 1.0) * scale)
             ki += 1
-        P = jnp.stack(p_rows, axis=0)          # (p_degree+1, N)
+        P = jnp.stack(p_rows, axis=0)
 
-        # ── Q_weights: (q_degree+1, N) ────────────────────────────────────
-        gamma = jnp.sqrt(1.0 - p0 ** 2)        # LRU-style input scaling (N,)
-        dc    = q_degree_correction(self.q_degree, self.taylor_decay)  # (q+1,)
+        gamma = jnp.sqrt(1.0 - p0 ** 2)
+        dc    = q_degree_correction(self.q_degree, self.taylor_decay)
         Q_raw = jax.random.normal(keys[ki], (self.q_degree + 1, N))
         Q     = Q_raw * dc[:, None] * gamma[None, :]
 

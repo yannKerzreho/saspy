@@ -21,4 +21,12 @@ htmlcov/
 
 experiments/
 note/
-benchmarks/
+
+# Benchmark experiment subdirectories
+benchmarks/clip/
+benchmarks/forecast_mode/
+benchmarks/forecasts/
+benchmarks/jl_projection/
+benchmarks/lorenz_scaling/
+benchmarks/scaling/
+benchmarks/validation/

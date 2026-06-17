@@ -1,35 +1,16 @@
-"""
-sparse_poly.py — Full sparse polynomial basis (ESN-inspired, Layer 2).
+"""Full sparse polynomial basis with N×N recurrent matrices (Layer 2).
 
-State update for each timestep t:
-
-    phi(z_tilde_t) = [1, z_1^1,...,z_K^1, z_1^2,...,z_K^2,...,z_K^D]  shape (F,)
-    A_t            = einsum('f,fij->ij', phi, P_weights)                 shape (N, N)
-    q_t            = Q_weights @ phi                                      shape (N,)
+    phi(z_tilde_t) = [1, z_1,...,z_K, z_1^2,...,z_K^2, ..., z_K^D]  shape (F,)
+    A_t            = einsum('f,fij->ij', phi, P_weights)               shape (N, N)
+    q_t            = Q_weights @ phi                                    shape (N,)
     s_t            = A_t @ s_{t-1} + q_t
 
-Features are degree-major: all K drivers at degree 1, then degree 2, …, degree D.
-F = 1 + K·D  (degree-0 constant is always phi[0] = 1).
+F = 1 + K·D  (degree-0 constant + K drivers × D degrees).
+P_weights: (F, N, N) sparse matrices;  Q_weights: (N, F) sparse matrix.
 
-P_weights : (F, N, N)  F sparse N×N matrices, linearly combined by phi.
-Q_weights : (N, F)     sparse input-to-state matrix.
-
-Usage
------
-basis = SparsePolyBasis(n=500, n_drivers=d, degree=2)
-model = SASModel(
-    projector = InputProjector.identity(d),   # identity: z_tilde = z
-    basis_p   = basis,
-    basis_q   = basis,
-)
-
-training_mode
--------------
-'parallel'   (default) — batch_eval_p materialises (T, N, N); the standard
-             two-level associative scan in engine.py is used.  Requires
-             roughly T × N² × 4 bytes of GPU VRAM (≈5 GB for T=5 000, N=500).
-'sequential' — the forecaster routes to _stream_scan (jax.lax.scan step-by-step),
-             which avoids materialising P_seq.  O(N²) memory instead of O(T·N²).
+training_mode='parallel' (default) materialises the full (T, N, N) P_seq and
+uses the two-level associative scan — fast but memory-intensive (≈T·N²·4 bytes).
+training_mode='sequential' routes to _stream_scan to avoid materialising P_seq.
 """
 
 import jax
