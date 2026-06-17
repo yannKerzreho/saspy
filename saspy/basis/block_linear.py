@@ -44,20 +44,22 @@ class BlockLinearPoly(BaseBasis):
 
     def __init__(
         self,
-        n_blocks:      int   = 50,
-        block_size:    int   = 4,
-        p_degree:      int   = 1,
-        q_degree:      int   = 1,
-        spectral_norm: float = 0.9,
-        max_input:     float = 4.0,
-        taylor_decay:  float = 1.0,
+        n_blocks:      int        = 50,
+        block_size:    int        = 4,
+        p_degree:      int        = 1,
+        q_degree:      int        = 1,
+        spectral_norm: float      = 0.9,
+        max_input:     float|None = 4.0,
+        taylor_decay:  float      = 1.0,
+        budget_ref:    float|None = None,
     ):
         super().__init__(p_degree, q_degree)
         self.K             = n_blocks
         self.B             = block_size
         self.spectral_norm = float(spectral_norm)
-        self.max_input     = float(max_input)
+        self.max_input     = float(max_input) if max_input is not None else None
         self.taylor_decay  = float(taylor_decay)
+        self.budget_ref    = float(budget_ref) if budget_ref is not None else None
 
     # ── dimensions ──────────────────────────────────────────────────────────
 
@@ -75,12 +77,13 @@ class BlockLinearPoly(BaseBasis):
         return (self.P_weights, self.Q_weights), (
             self.K, self.B, self.p_degree, self.q_degree,
             self.spectral_norm, self.max_input, self.taylor_decay,
+            self.budget_ref,
         )
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        K, B, p, q, sn, mi, td = aux
-        obj = cls(K, B, p, q, sn, mi, td)
+        K, B, p, q, sn, mi, td, br = aux
+        obj = cls(K, B, p, q, sn, mi, td, br)
         obj.P_weights, obj.Q_weights = children
         return obj
 
@@ -93,7 +96,6 @@ class BlockLinearPoly(BaseBasis):
         key_P0, key_Pmod, key_Q = jax.random.split(key, 3)
 
         # ── Step 1: degree-0 base matrices (orthogonal × spectral_norm) ──
-        # QR decomposition of K independent random Gaussian matrices.
         keys_P0   = jax.random.split(key_P0, K)
 
         def _rand_orth(k):
@@ -105,35 +107,34 @@ class BlockLinearPoly(BaseBasis):
         P0 = jax.vmap(_rand_orth)(keys_P0) * sn  # (K, B, B)
 
         # ── Step 2: Q weights ─────────────────────────────────────────────
-        # gamma = sqrt(1 − sn²) — uniform across blocks (isotropic init)
         gamma = (1.0 - sn ** 2) ** 0.5
         dc    = q_degree_correction(self.q_degree, self.taylor_decay)  # (q+1,)
         Q_raw = jax.random.normal(key_Q, (self.q_degree + 1, K, B)) / (B ** 0.5)
         Q     = Q_raw * dc[:, None, None] * gamma
         # Q shape: (q_degree+1, K, B)
 
-        # ── Step 3: degrees 1+ — Volterra modulation ─────────────────────
-        # Budget per block: (1 − sn) * 0.9 / max_input
-        mod_sn = (1.0 - sn) * 0.9 / self.max_input
+        # ── Step 3: degrees 1+ — per-degree Volterra modulation ──────────
+        # Degree d gets budget (1-sn)·0.9 / (2^(d-1) · scale_ref^d) so that
+        # ‖M_d‖ · scale_ref^d ≤ (1-sn)·0.9 / 2^(d-1) with geometric decay.
+        scale_ref = self._budget_ref()
 
         if self.p_degree >= 1:
-            P_mod_raw = jax.random.normal(key_Pmod, (self.p_degree, K, B, B))
-
-            def _scale_seq(seq, budget):
-                norms = jax.vmap(lambda M: jnp.linalg.norm(M, ord=2))(seq)
-                return seq * (budget / jnp.maximum(jnp.sum(norms), 1e-8))
-
-            P_mod_k      = jnp.swapaxes(P_mod_raw, 0, 1)              # (K, p_deg, B, B)
-            P_mod_scaled = jax.vmap(_scale_seq)(
-                P_mod_k, jnp.full((K,), mod_sn)
-            )                                                           # (K, p_deg, B, B)
-            P_mod        = jnp.swapaxes(P_mod_scaled, 0, 1)           # (p_deg, K, B, B)
-            P            = jnp.concatenate([P0[None], P_mod], axis=0) # (p+1, K, B, B)
+            keys_mod = jax.random.split(key_Pmod, self.p_degree)
+            P_mod_list = []
+            for d in range(1, self.p_degree + 1):
+                budget_d = (1.0 - sn) * 0.9 / (float(2 ** (d - 1)) * scale_ref ** d)
+                M = jax.random.normal(keys_mod[d - 1], (K, B, B))
+                norms = jax.vmap(lambda m: jnp.linalg.norm(m, ord=2))(M)  # (K,)
+                M = M * (budget_d / jnp.maximum(norms, 1e-8))[:, None, None]
+                P_mod_list.append(M)
+            P_mod = jnp.stack(P_mod_list, axis=0)                     # (p_deg, K, B, B)
+            P     = jnp.concatenate([P0[None], P_mod], axis=0)        # (p+1, K, B, B)
         else:
             P = P0[None]                                               # (1, K, B, B)
 
         obj = BlockLinearPoly(K, B, self.p_degree, self.q_degree,
-                              self.spectral_norm, self.max_input, self.taylor_decay)
+                              self.spectral_norm, self.max_input, self.taylor_decay,
+                              self.budget_ref)
         obj.P_weights, obj.Q_weights = P, Q
         return obj
 
@@ -141,14 +142,16 @@ class BlockLinearPoly(BaseBasis):
 
     def eval_p(self, z_tilde_t):
         """z_tilde_t: (K,) → A: (K, B, B)."""
-        z = jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde_t)
         powers = jnp.arange(self.p_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[None, :], powers[:, None])              # (p+1, K)
         return jnp.einsum('dk,dkij->kij', feats, self.P_weights)
 
     def eval_q(self, z_tilde_t):
         """z_tilde_t: (K,) → q: (N,)."""
-        z = jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde_t)
         powers = jnp.arange(self.q_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[None, :], powers[:, None])              # (q+1, K)
         q      = jnp.einsum('dk,dkb->kb', feats, self.Q_weights)     # (K, B)
@@ -158,14 +161,16 @@ class BlockLinearPoly(BaseBasis):
 
     def batch_eval_p(self, z_tilde):
         """z_tilde: (T, K) → (T, K, B, B)."""
-        z = jnp.clip(z_tilde, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde)
         powers = jnp.arange(self.p_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[:, None, :], powers[None, :, None])     # (T, p+1, K)
         return jnp.einsum('tdk,dkij->tkij', feats, self.P_weights)
 
     def batch_eval_q(self, z_tilde):
         """z_tilde: (T, K) → (T, N)."""
-        z = jnp.clip(z_tilde, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde)
         powers = jnp.arange(self.q_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[:, None, :], powers[None, :, None])     # (T, q+1, K)
         q      = jnp.einsum('tdk,dkb->tkb', feats, self.Q_weights)   # (T, K, B)

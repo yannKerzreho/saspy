@@ -32,6 +32,14 @@ class BaseBasis(abc.ABC):
     def is_initialized(self) -> bool:
         return self.P_weights is not None
 
+    def _budget_ref(self) -> float:
+        """Scale reference for P weight budget.
+        Subclasses set self.budget_ref and self.max_input in __init__."""
+        if getattr(self, 'budget_ref', None) is not None:
+            return self.budget_ref
+        mi = getattr(self, 'max_input', None)
+        return mi if mi is not None else 1.0
+
     # ── dimensions ──────────────────────────────────────────────────────────
 
     @property

@@ -52,24 +52,26 @@ class LRUBlockPoly(BaseBasis):
 
     def __init__(
         self,
-        n_blocks:      int   = 50,
-        p_degree:      int   = 1,
-        q_degree:      int   = 1,
-        spectral_norm: float = 0.9,
-        tau_min:       float = 1.0,
-        tau_max:       float = 100.0,
-        max_input:     float = 4.0,
-        frac_diagonal: float = 0.5,
-        taylor_decay:  float = 1.0,
+        n_blocks:      int        = 50,
+        p_degree:      int        = 1,
+        q_degree:      int        = 1,
+        spectral_norm: float      = 0.9,
+        tau_min:       float      = 1.0,
+        tau_max:       float      = 100.0,
+        max_input:     float|None = 4.0,
+        frac_diagonal: float      = 0.5,
+        taylor_decay:  float      = 1.0,
+        budget_ref:    float|None = None,
     ):
         super().__init__(p_degree, q_degree)
         self.K             = n_blocks
         self.spectral_norm = float(spectral_norm)
         self.tau_min       = float(tau_min)
         self.tau_max       = float(tau_max)
-        self.max_input     = float(max_input)
+        self.max_input     = float(max_input) if max_input is not None else None
         self.frac_diagonal = float(frac_diagonal)
         self.taylor_decay  = float(taylor_decay)
+        self.budget_ref    = float(budget_ref) if budget_ref is not None else None
 
     # ── dimensions ──────────────────────────────────────────────────────────
 
@@ -88,12 +90,13 @@ class LRUBlockPoly(BaseBasis):
             self.K, self.p_degree, self.q_degree,
             self.spectral_norm, self.tau_min, self.tau_max,
             self.max_input, self.frac_diagonal, self.taylor_decay,
+            self.budget_ref,
         )
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        K, p, q, sn, tmin, tmax, mi, fd, td = aux
-        obj = cls(K, p, q, sn, tmin, tmax, mi, fd, td)
+        K, p, q, sn, tmin, tmax, mi, fd, td, br = aux
+        obj = cls(K, p, q, sn, tmin, tmax, mi, fd, td, br)
         obj.P_weights, obj.Q_weights = children
         return obj
 
@@ -107,7 +110,6 @@ class LRUBlockPoly(BaseBasis):
         key_theta, key_mod, key_q = jax.random.split(key, 3)
 
         # ── Step 1: degree-0 rotation blocks ─────────────────────────────
-        # Log-spaced timescales → radii
         log_taus = jnp.linspace(jnp.log(self.tau_min), jnp.log(self.tau_max), K)
         taus     = jnp.exp(log_taus)               # (K,)
         r        = jnp.exp(-1.0 / taus)            # (K,) ∈ (0, 1)
@@ -129,35 +131,36 @@ class LRUBlockPoly(BaseBasis):
         P0 = jax.vmap(_rot)(r, theta)               # (K, 2, 2)
 
         # ── Step 2: Q weights with LRU gamma normalisation ───────────────
-        gamma            = jnp.sqrt(1.0 - r ** 2)  # (K,)
-        gamma_per_neuron = jnp.repeat(gamma, _B)    # (N,)
+        gamma = jnp.sqrt(1.0 - r ** 2)  # (K,)
 
         dc    = q_degree_correction(self.q_degree, self.taylor_decay)  # (q+1,)
         Q_raw = jax.random.normal(key_q, (self.q_degree + 1, K, _B)) / jnp.sqrt(2.0)
         Q     = Q_raw * dc[:, None, None] * gamma[None, :, None]
         # Q shape: (q_degree+1, K, 2)
 
-        # ── Step 3: degrees 1+ — small Volterra modulation blocks ────────
-        mod_sn = (1.0 - r) * 0.9 / self.max_input  # (K,) per-block budget
+        # ── Step 3: degrees 1+ — per-degree Volterra modulation ──────────
+        # Per block k, degree d: budget (1−r_k)·0.9 / (2^(d−1) · scale_ref^d)
+        # so that ‖M_d[k]‖ · scale_ref^d ≤ (1−r_k)·0.9 / 2^(d−1).
+        scale_ref = self._budget_ref()
 
         if self.p_degree >= 1:
-            P_mod_raw = jax.random.normal(key_mod, (self.p_degree, K, _B, _B))
-
-            def _scale_seq(seq, budget):
-                # seq: (p_degree, 2, 2)
-                norms = jax.vmap(lambda M: jnp.linalg.norm(M, ord=2))(seq)
-                return seq * (budget / jnp.maximum(jnp.sum(norms), 1e-8))
-
-            P_mod_k      = jnp.swapaxes(P_mod_raw, 0, 1)             # (K, p_deg, 2, 2)
-            P_mod_scaled = jax.vmap(_scale_seq)(P_mod_k, mod_sn)      # (K, p_deg, 2, 2)
-            P_mod        = jnp.swapaxes(P_mod_scaled, 0, 1)           # (p_deg, K, 2, 2)
-            P            = jnp.concatenate([P0[None], P_mod], axis=0) # (p+1, K, 2, 2)
+            keys_mod = jax.random.split(key_mod, self.p_degree)
+            P_mod_list = []
+            for d in range(1, self.p_degree + 1):
+                budget_d = (1.0 - r) * 0.9 / (float(2 ** (d - 1)) * scale_ref ** d)
+                M = jax.random.normal(keys_mod[d - 1], (K, _B, _B))
+                norms = jax.vmap(lambda m: jnp.linalg.norm(m, ord=2))(M)  # (K,)
+                M = M * (budget_d / jnp.maximum(norms, 1e-8))[:, None, None]
+                P_mod_list.append(M)
+            P_mod = jnp.stack(P_mod_list, axis=0)                     # (p_deg, K, 2, 2)
+            P     = jnp.concatenate([P0[None], P_mod], axis=0)        # (p+1, K, 2, 2)
         else:
             P = P0[None]                                               # (1, K, 2, 2)
 
         obj = LRUBlockPoly(K, self.p_degree, self.q_degree,
                            self.spectral_norm, self.tau_min, self.tau_max,
-                           self.max_input, self.frac_diagonal, self.taylor_decay)
+                           self.max_input, self.frac_diagonal, self.taylor_decay,
+                           self.budget_ref)
         obj.P_weights, obj.Q_weights = P, Q
         return obj
 
@@ -165,14 +168,16 @@ class LRUBlockPoly(BaseBasis):
 
     def eval_p(self, z_tilde_t):
         """z_tilde_t: (K,) → A: (K, 2, 2)."""
-        z = jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde_t)
         powers = jnp.arange(self.p_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[None, :], powers[:, None])              # (p+1, K)
         return jnp.einsum('dk,dkij->kij', feats, self.P_weights)
 
     def eval_q(self, z_tilde_t):
         """z_tilde_t: (K,) → q: (N,)."""
-        z = jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde_t, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde_t)
         powers = jnp.arange(self.q_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[None, :], powers[:, None])              # (q+1, K)
         q      = jnp.einsum('dk,dkb->kb', feats, self.Q_weights)     # (K, 2)
@@ -182,14 +187,16 @@ class LRUBlockPoly(BaseBasis):
 
     def batch_eval_p(self, z_tilde):
         """z_tilde: (T, K) → (T, K, 2, 2)."""
-        z = jnp.clip(z_tilde, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde)
         powers = jnp.arange(self.p_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[:, None, :], powers[None, :, None])     # (T, p+1, K)
         return jnp.einsum('tdk,dkij->tkij', feats, self.P_weights)   # (T, K, 2, 2)
 
     def batch_eval_q(self, z_tilde):
         """z_tilde: (T, K) → (T, N)."""
-        z = jnp.clip(z_tilde, -self.max_input, self.max_input)
+        z = (jnp.clip(z_tilde, -self.max_input, self.max_input)
+             if self.max_input is not None else z_tilde)
         powers = jnp.arange(self.q_degree + 1, dtype=jnp.float32)
         feats  = jnp.power(z[:, None, :], powers[None, :, None])     # (T, q+1, K)
         q      = jnp.einsum('tdk,dkb->tkb', feats, self.Q_weights)   # (T, K, 2)

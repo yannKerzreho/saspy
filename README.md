@@ -1,6 +1,6 @@
 # saspy
 
-SAS (Spectral Associative Scan) reservoir computing for univariate time-series forecasting.
+SAS (Sate Affine Systems) reservoir computing for univariate time-series forecasting.
 
 The reservoir state evolves as a polynomial recurrence
 
