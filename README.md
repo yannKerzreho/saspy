@@ -1,16 +1,19 @@
 # saspy
 
-![Benchmark](benchmarks/benchmark.png)
+**State Affine Systems (SAS)** reservoir computing for time-series forecasting.
 
-SAS (Sate Affine Systems) reservoir computing for univariate time-series forecasting.
-
-The reservoir state evolves as a polynomial recurrence
+The reservoir evolves as a polynomial recurrence
 
     s_t = P(z_t) ⊛ s_{t-1} + Q(z_t)
 
-and is computed in `O(log T)` depth via a two-level parallel associative scan
-in JAX. Forecasts are produced by per-horizon ridge regression on the state
-vector.
+computed in `O(log T)` depth via a parallel associative scan in JAX.
+Forecasts are produced by per-horizon ridge regression on the reservoir state.
+
+![Benchmark](benchmarks/benchmark.png)
+
+*All metrics are higher-is-better (NRMSE and SWD are negated). See [Benchmark](#benchmark) for details.*
+
+---
 
 ## Install
 
@@ -24,38 +27,72 @@ pip install -e .
 import numpy as np
 from saspy import SASForecaster, DiagonalPoly
 
-# Synthetic AR(1)
 rng = np.random.default_rng(0)
 y = np.zeros(1000)
 for t in range(1, 1000):
     y[t] = 0.7 * y[t-1] + rng.normal(0, 1)
 
-# Train on first 800 points
 basis = DiagonalPoly(p_degree=1, q_degree=1)
 model = SASForecaster(basis=basis, n_reservoir=100, washout=50)
 model.fit(y[:800], horizons=[1, 5, 10])
 
-# Streaming forecast over the remaining 200 points
-# At each step: predict h=1 (forecast for y[t]), then ingest y[t].
 preds = []
 for t in range(800, 1000):
     preds.append(model.predict(1))
     model.update(y[t])
-
-preds = np.asarray(preds)
-truth = y[800:1000]
-mse   = np.mean((preds - truth) ** 2)
-print(f"h=1 MSE: {mse:.3f}  (mean-predictor baseline ~{np.var(truth):.3f})")
 ```
 
-See `examples/etth1_example.ipynb` for a real-data walkthrough on ETTh1.
+See `examples/etth1_example.ipynb` for a real-data walkthrough.
+
+---
+
+## Basis
+
+The basis controls the structure of `P(z)` and `Q(z)`.
+
+| Class | Description |
+|---|---|
+| `DiagonalPoly` | Diagonal `P` matrices — `O(n)` per step, fast and memory-efficient |
+| `LRUBlockPoly` | Block-diagonal `P` with rotation structure — expressive, `O(n)` per step |
+| `BlockLinearPoly` | Block-diagonal `P` with random orthogonal initialisation — larger blocks |
+| `RandomFourierBasis` | Random Fourier feature map for kernel approximation |
+| `SparsePolyBasis` | Sparse polynomial basis with explicit monomial selection |
+
+`DiagonalPoly` and `LRUBlockPoly` are the recommended defaults.
+
+---
+
+## Benchmark
+
+Models are evaluated in autonomous rollout mode (the model feeds its own predictions back as input). Three metrics are reported:
+
+| Metric | Definition | Better |
+|---|---|---|
+| **NRMSE h=10** | Normalised RMSE at horizon 10, averaged over channels | Lower |
+| **VPT** | Valid Prediction Time — steps until NRMSE exceeds 0.4 (ε = 0.4). Reported in Lyapunov times (TL) for chaotic systems | Higher |
+| **SWD** | Sliced Wasserstein Distance between the true and predicted attractor (200 random projections) | Lower |
+
+The benchmark compares three models across five dynamical systems (Mackey-Glass, MSO-8, Lorenz, Rössler, Lorenz96-5):
+
+- **ESN-500** — Echo State Network, 500 units, leaky integrator
+- **SAS-LRU** — SAS with `LRUBlockPoly`, 250 blocks
+- **SAS-Diag** — SAS with `DiagonalPoly`, 500 units, degree (p=2, q=3)
+
+To reproduce:
+
+```bash
+cd benchmarks
+python main.py
+```
+
+---
 
 ## API
 
-* `SASForecaster(basis, n_reservoir, ...)` — fit / update / predict / transform
-* `DiagonalPoly(p_degree, q_degree, ...)` — O(n) diagonal basis
-* `LRUBlockPoly(p_degree, q_degree, ...)` — O(n) LRU-style rotation-block basis
-* `BasePoly` — abstract base for custom bases
+- `SASForecaster(basis, n_reservoir, ...)` — fit / update / predict / transform
+- `DiagonalPoly(n, p_degree, q_degree, ...)` — diagonal basis
+- `LRUBlockPoly(n_blocks, p_degree, q_degree, ...)` — rotation-block basis
+- `BaseBasis` — abstract base for custom bases
 
 ## Tests
 
