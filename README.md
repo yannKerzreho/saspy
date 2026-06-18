@@ -65,15 +65,15 @@ Models are evaluated in autonomous rollout mode (the model feeds its own predict
 
 | Metric | Definition | Better |
 |---|---|---|
-| **NRMSE h=10** | Normalised RMSE at horizon 10, averaged over channels | Lower |
-| **VPT** | Valid Prediction Time — steps until NRMSE exceeds 0.4 (ε = 0.4). Reported in Lyapunov times (TL) for chaotic systems | Higher |
-| **SWD** | Sliced Wasserstein Distance between the true and predicted attractor (200 random projections) | Lower |
+| **NRMSE h=10** | Normalised RMSE at horizon 10, averaged over channels (negated in plot) | Lower |
+| **VPT** | Steps until NRMSE exceeds 0.4. Reported in Lyapunov times (TL) for chaotic systems | Higher |
+| **SWD** | Sliced Wasserstein Distance between true and predicted attractor, 200 projections (negated in plot) | Lower |
 
-The benchmark compares three models across five dynamical systems (Mackey-Glass, MSO-8, Lorenz, Rössler, Lorenz96-5):
+The benchmark compares three models across nine dynamical systems (Mackey-Glass, MSO-8, Logistic Map, Hénon Map, Lorenz, Rössler, Multiscroll, Doublescroll, Lorenz96-5):
 
-- **ESN-500** — Echo State Network, 500 units, leaky integrator
-- **SAS-LRU** — SAS with `LRUBlockPoly`, 250 blocks
-- **SAS-Diag** — SAS with `DiagonalPoly`, 500 units, degree (p=2, q=3)
+- **ESN** — Echo State Network, 500 units, lr=0.25, sr=1.1
+- **SAS Diag** — `DiagonalPoly`, 500 units, p=2, q=3
+- **SAS RFF** — `RandomFourierBasis`, 500 units, bandwidth=0.5
 
 To reproduce:
 
