@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "saspy"
 version = "0.2.0"
-description = "SAS (Spectral Associative Scan) reservoir computing for time-series forecasting"
+description = "SAS (State Affine System) reservoir computing for time-series forecasting"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
