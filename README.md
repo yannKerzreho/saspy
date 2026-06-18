@@ -42,7 +42,6 @@ for t in range(800, 1000):
     model.update(y[t])
 ```
 
-See `examples/etth1_example.ipynb` for a real-data walkthrough.
 
 ---
 
