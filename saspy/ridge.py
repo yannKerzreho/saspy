@@ -127,10 +127,10 @@ def ridge_cv_select(
             if mse < best_mse:
                 best_mse, best = mse, alpha
 
-    if best in (alphas[0], alphas[-1]):
+    if best == alphas[-1]:
         import warnings
         warnings.warn(
-            f"Ridge alpha={best:.2e} hit grid boundary "
+            f"Ridge alpha={best:.2e} hit upper grid boundary "
             f"[{alphas[0]:.2e}, {alphas[-1]:.2e}]. "
             "Consider extending ALPHAS.", stacklevel=2)
     return best
