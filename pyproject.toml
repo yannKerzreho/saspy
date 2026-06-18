@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "saspy"
 version = "0.2.0"
-description = "SAS (Spectral Associative Scan) reservoir computing for time-series forecasting"
+description = "SAS (State Affine Systems) reservoir computing for time-series forecasting"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [{name = "TODO"}]
+authors = [{name = "Yann Kerzreho", email = "kzr.yann@gmail.com"}]
 keywords = ["reservoir-computing", "time-series", "forecasting", "jax"]
 classifiers = [
     "Development Status :: 3 - Alpha",
