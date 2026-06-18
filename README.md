@@ -41,8 +41,6 @@ for t in range(800, 1000):
     preds.append(model.predict(1))
     model.update(y[t])
 ```
-
-
 ---
 
 ## Basis
