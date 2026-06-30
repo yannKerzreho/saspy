@@ -27,24 +27,30 @@ class BaseForecaster(ABC):
         """Point forecast h steps ahead (in the same scale as the input)."""
         ...
 
-    # ── z-score helpers (shared by all subclasses) ────────────────────────────
+    # ── min-max [-1, 1] scaling helpers (shared by all subclasses) ─────────────
+    # The reservoir lives on the compact domain [-1, 1]; data is mapped there by
+    # an affine min→−1 / max→+1 transform, stored as (center, half) so the same
+    # (x − center)/half form drives both scalar and per-channel paths.
 
     @staticmethod
     def _fit_scaler(history: np.ndarray) -> tuple[float, float]:
-        """Return (mean, std) from training window; std floored at 1e-8."""
-        mu    = float(np.mean(history))
-        sigma = float(np.std(history))
-        return mu, max(sigma, 1e-8)
+        """Return (center, half) mapping [min, max] → [-1, 1]; half floored at 1e-8."""
+        lo, hi = float(np.min(history)), float(np.max(history))
+        return (lo + hi) / 2.0, max((hi - lo) / 2.0, 1e-8)
 
     @staticmethod
-    def _zscore(x, mu: float, sigma: float):
-        """Standardise x with pre-fitted (mu, sigma)."""
-        return (np.asarray(x) - mu) / sigma
+    def _scale(x, center, half):
+        """Map x into [-1, 1] with pre-fitted (center, half)."""
+        return (np.asarray(x) - center) / half
 
     @staticmethod
-    def _unzscore(z, mu: float, sigma: float):
-        """Inverse standardisation."""
-        return np.asarray(z) * sigma + mu
+    def _unscale(z, center, half):
+        """Inverse of _scale."""
+        return np.asarray(z) * half + center
+
+    # backward-compatible aliases (kept so external callers don't break)
+    _zscore   = _scale
+    _unzscore = _unscale
 
     def __repr__(self) -> str:
         return self.__class__.__name__

@@ -113,7 +113,7 @@ def _esn_autoreg_rollout(W_r, Win, bias, lr, W_out, s0, n_steps: int) -> jnp.nda
     """Advance the reservoir n_steps autoregressively; non-destructive."""
     def body(s, _):
         y_z   = s @ W_out
-        u     = jnp.clip(jnp.atleast_1d(y_z), -10.0, 10.0).astype(jnp.float32)
+        u     = jnp.clip(jnp.atleast_1d(y_z), -1.0, 1.0).astype(jnp.float32)
         s_new = (1.0 - lr) * s + lr * jnp.tanh(W_r @ s + Win @ u + bias)
         return s_new, None
     s_final, _ = jax.lax.scan(body, s0, None, length=n_steps)
@@ -137,11 +137,12 @@ class JaxESNForecaster:
 
     def __init__(
         self,
-        esn:        JaxESN,
-        washout:    int  = 50,
-        mode:       str  = 'direct',
-        n_cv_folds: int  = 5,
-        alphas:     list | None = None,
+        esn:         JaxESN,
+        washout:     int  = 50,
+        mode:        str  = 'direct',
+        n_cv_folds:  int  = 5,
+        alphas:      list | None = None,
+        clip_output: bool = True,
     ) -> None:
         if mode not in ('direct', 'autoreg'):
             raise ValueError(f"mode must be 'direct' or 'autoreg', got {mode!r}")
@@ -150,37 +151,33 @@ class JaxESNForecaster:
                 "JaxESNForecaster requires saspy.ridge. "
                 "Make sure saspy is on the Python path."
             )
-        self._esn       = esn
-        self.washout    = washout
-        self.mode       = mode
-        self.n_cv_folds = n_cv_folds
-        self.alphas     = list(alphas) if alphas is not None else _DEFAULT_ALPHAS
+        self._esn        = esn
+        self.washout     = washout
+        self.mode        = mode
+        self.n_cv_folds  = n_cv_folds
+        self.alphas      = list(alphas) if alphas is not None else _DEFAULT_ALPHAS
+        # No z-scoring: the data is assumed already in the reservoir's [-1, 1]
+        # domain (load_dgp normalises).  clip_output clamps predictions there.
+        self.clip_output = clip_output
 
-        self._W:     dict[int, np.ndarray] = {}
-        self._mu:    np.ndarray | None = None   # (D,) per-channel mean
-        self._sigma: np.ndarray | None = None   # (D,) per-channel std
+        self._W: dict[int, np.ndarray] = {}
 
     def fit(self, X_tr: np.ndarray, horizons: list[int]) -> 'JaxESNForecaster':
-        """Run the reservoir on X_tr and fit ridge readout(s).
+        """Run the reservoir on X_tr (raw, no z-scoring) and fit ridge readout(s).
 
-        X_tr : (T, D) training data (z-scored internally per channel).
-        In 'autoreg' mode only h=1 is fitted.
+        X_tr : (T, D) training data, assumed in [-1, 1].  'autoreg' fits only h=1.
         """
         X_tr = np.asarray(X_tr, dtype=np.float64)
         if X_tr.ndim == 1:
             X_tr = X_tr[:, None]
         T, D = X_tr.shape
 
-        self._mu    = X_tr.mean(axis=0)
-        self._sigma = np.maximum(X_tr.std(axis=0), 1e-8)
-        X_z = ((X_tr - self._mu) / self._sigma).astype(np.float32)
-
         if self._esn._W is None:
             self._esn._state = None
         else:
             self._esn._state = jnp.zeros(self._esn.units, dtype=jnp.float32)
-        states = self._esn.run(X_z[:-1])   # (T-1, N)
-        self._esn.run(X_z[-1:])            # advance to state after last input
+        states = self._esn.run(X_tr[:-1])   # (T-1, N)
+        self._esn.run(X_tr[-1:])            # advance to state after the last input
 
         wo = self.washout
         N  = self._esn.units
@@ -189,7 +186,7 @@ class JaxESNForecaster:
         fit_horizons = [1] if self.mode == 'autoreg' else horizons
         for h in fit_horizons:
             S = states[wo: T - h].astype(np.float64)
-            Y = X_z  [wo + h: T].astype(np.float64)
+            Y = X_tr  [wo + h: T].astype(np.float64)
             if len(S) < 5:
                 self._W[h] = np.zeros((N, D), dtype=np.float32)
                 continue
@@ -199,7 +196,7 @@ class JaxESNForecaster:
         return self
 
     def predict(self, h: int) -> np.ndarray:
-        """h-step forecast in original scale (D,).  Non-destructive."""
+        """h-step forecast (D,), in the [-1, 1] data scale.  Non-destructive."""
         if not self._W:
             raise RuntimeError("JaxESNForecaster must be fit before predict().")
 
@@ -208,7 +205,7 @@ class JaxESNForecaster:
         if self.mode == 'direct':
             if h not in self._W:
                 raise KeyError(f"Horizon {h} not trained. Available: {sorted(self._W)}")
-            y_z = s.astype(np.float64) @ self._W[h]
+            y = s.astype(np.float64) @ self._W[h]
         else:
             if 1 not in self._W:
                 raise RuntimeError("autoreg mode requires W[1]; call fit() first.")
@@ -218,16 +215,17 @@ class JaxESNForecaster:
                 self._esn._W, self._esn._Win, self._esn._bias,
                 self._esn._lr_jx, W1, s0, h - 1,
             )
-            y_z = (np.asarray(s_prev, dtype=np.float64)
+            y = (np.asarray(s_prev, dtype=np.float64)
                    @ np.asarray(self._W[1], dtype=np.float64))
 
-        return y_z * self._sigma + self._mu
+        if self.clip_output:
+            y = np.clip(y, -1.0, 1.0)
+        return y
 
     def update(self, x: np.ndarray) -> 'JaxESNForecaster':
-        """Ingest one new observation (original scale) and advance the reservoir."""
-        if self._mu is None:
+        """Ingest one new observation ([-1, 1] scale) and advance the reservoir."""
+        if not self._W:
             raise RuntimeError("JaxESNForecaster must be fit before update().")
-        x_arr = np.asarray(x, dtype=np.float64).ravel()
-        x_z   = ((x_arr - self._mu) / self._sigma).astype(np.float32)
-        self._esn.run(x_z[None, :])
+        x_arr = np.asarray(x, dtype=np.float32).ravel()
+        self._esn.run(x_arr[None, :])
         return self

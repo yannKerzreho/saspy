@@ -4,10 +4,11 @@ Wraps SASModel + ridge regression into the BaseForecaster protocol.
 
     fit(history, horizons, context=None) → run scan, fit ridge readout(s).
     update(x)                            → single streaming step.
-    predict(h)                           → h-step forecast, un-z-scored.
+    predict(h)                           → h-step forecast, in the input scale.
     transform(history, context=None)     → (T, N) reservoir states.
 
-Z-scoring is handled internally; other preprocessing is the caller's responsibility.
+Inputs are min-max scaled into the reservoir's compact domain [-1, 1]; other
+preprocessing is the caller's responsibility.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import jax.numpy as jnp
 
 from .base       import BaseForecaster
 from .model      import SASModel
-from .engine     import _forward, _step_once, _stream_scan
+from .engine     import _forward, _step_once, _stream_scan, _fast_seq_scan
 from .ridge      import (
     ALPHAS          as _ALPHAS,
     ridge_cv_select as _ridge_cv,
@@ -30,14 +31,19 @@ from .ridge      import (
 
 # ── Autoregressive rollout kernel ────────────────────────────────────────────
 
-@functools.partial(jax.jit, static_argnames=('n_steps',))
-def _autoreg_rollout(model, s0, W1, n_steps: int):
+@functools.partial(jax.jit, static_argnames=('n_steps', 'clip'))
+def _autoreg_rollout(model, s0, W1, n_steps: int, clip: bool = False):
     """Advance the reservoir n_steps autoregressively; non-destructive.
 
     n_steps=0 returns s0 unchanged (lax.scan with length=0 is the identity).
+    With clip=True the fed-back prediction is clamped to the [-1, 1] domain
+    before re-entering the reservoir — this keeps the closed loop in-domain and
+    prevents the autonomous divergence that unbounded feedback can trigger.
     """
     def body(s, _):
         y_z = s @ W1                                   # () or (D,)
+        if clip:
+            y_z = jnp.clip(y_z, -1.0, 1.0)
         z_t = jnp.atleast_1d(y_z).astype(jnp.float32) # (1,) or (D,)
         return model.step(z_t, s), None
     s_final, _ = jax.lax.scan(body, s0, None, length=n_steps)
@@ -73,11 +79,16 @@ class SASForecaster(BaseForecaster):
     seed        : JAX PRNG seed for model initialisation.
     alphas      : ridge penalty candidates (default: log-spaced 1e-4…1e5).
     mode        : 'direct' | 'autoreg'
-    scale_input : if True (default) z-score context and history before feeding
-                  the reservoir; predictions are unzscored back to the original
-                  scale.  Set False when the data already lives on a compact
-                  attractor and no re-scaling is needed — the reservoir then
-                  sees and predicts in the raw data units.
+    scale_input : if True, min-max scale context and history into [-1, 1] before
+                  feeding the reservoir; predictions are mapped back to the
+                  original scale.  Default False — the data is assumed to already
+                  live in [-1, 1] (a DGP normalised to its known bounds) and the
+                  reservoir sees and predicts in the raw data units.
+    clip_output : if True, clamp predictions to the [-1, 1] domain (in the
+                  reservoir scale).  In autoreg mode this also clamps the fed-back
+                  prediction each step, keeping the closed loop in-domain and
+                  guarding against autonomous divergence.  Use when the DGP is
+                  known to be bounded in [-1, 1].  Default False.
     """
 
     def __init__(
@@ -85,11 +96,12 @@ class SASForecaster(BaseForecaster):
         model:        SASModel,
         washout:      int        = 50,
         chunk_size:   int        = 64,
-        n_cv_folds:   int        = 4,
+        n_cv_folds:   int        = 5,
         seed:         int        = 42,
         alphas:       list | None = None,
         mode:         str        = 'direct',
-        scale_input:  bool       = True,
+        scale_input:  bool       = False,
+        clip_output:  bool       = False,
     ):
         if not isinstance(model, SASModel):
             raise TypeError(
@@ -105,6 +117,7 @@ class SASForecaster(BaseForecaster):
         self.alphas      = list(alphas) if alphas is not None else _ALPHAS
         self.mode        = mode
         self.scale_input = scale_input
+        self.clip_output = clip_output
 
         self._W:            dict[int, np.ndarray] = {}
         self._s_last:       np.ndarray | None    = None
@@ -145,8 +158,9 @@ class SASForecaster(BaseForecaster):
 
         if history.ndim == 2:
             if self.scale_input:
-                self._mu    = history.mean(axis=0)                   # (D,)
-                self._sigma = np.maximum(history.std(axis=0), 1e-8)  # (D,)
+                lo, hi      = history.min(axis=0), history.max(axis=0)   # (D,)
+                self._mu    = (lo + hi) / 2.0                            # center
+                self._sigma = np.maximum((hi - lo) / 2.0, 1e-8)         # half-range
             else:
                 self._mu    = np.zeros(history.shape[1])
                 self._sigma = np.ones(history.shape[1])
@@ -167,8 +181,9 @@ class SASForecaster(BaseForecaster):
                     f"context.shape[0]={ctx.shape[0]} != len(history)={T}"
                 )
             if self.scale_input:
-                self._ctx_mu    = ctx.mean(axis=0)                        # (d,)
-                self._ctx_sigma = np.maximum(ctx.std(axis=0), 1e-8)       # (d,)
+                lo, hi          = ctx.min(axis=0), ctx.max(axis=0)        # (d,)
+                self._ctx_mu    = (lo + hi) / 2.0                         # center
+                self._ctx_sigma = np.maximum((hi - lo) / 2.0, 1e-8)       # half-range
             else:
                 self._ctx_mu    = np.zeros(ctx.shape[1])
                 self._ctx_sigma = np.ones(ctx.shape[1])
@@ -184,7 +199,10 @@ class SASForecaster(BaseForecaster):
         z      = jnp.array(ctx_z)
         s0     = jnp.zeros(self._model.n, dtype=jnp.float32)
         if getattr(self._model.basis_p, 'training_mode', 'parallel') == 'sequential':
-            states, s_last = _stream_scan(self._model, s0, z)
+            # fast teacher-forced scan (precomputed features) when the basis supports
+            # it (Sparse, LowRank); else the per-step streaming scan.
+            scan = _fast_seq_scan if hasattr(self._model.basis_p, 'scan_matvec') else _stream_scan
+            states, s_last = scan(self._model, s0, z)
         else:
             states, s_last = _forward(self._model, z, s0, self.chunk_size)
 
@@ -266,11 +284,14 @@ class SASForecaster(BaseForecaster):
             W1     = jnp.array(self._W[1], dtype=jnp.float32)   # (N,) or (N, D)
             s0     = jnp.array(self._s_last, dtype=jnp.float32)  # (N,)
             # Advance h-1 steps; lax.scan with length=0 returns s0 (h=1 case).
-            s_prev = _autoreg_rollout(self._model, s0, W1, h - 1)
+            s_prev = _autoreg_rollout(self._model, s0, W1, h - 1, clip=self.clip_output)
             y_z    = (np.asarray(s_prev, dtype=np.float64)
                       @ np.asarray(self._W[1], dtype=np.float64))  # scalar or (D,)
 
-        out = self._unzscore(y_z, self._mu, self._sigma)
+        # Optional clamp to the [-1, 1] domain (use when the DGP is known bounded).
+        if self.clip_output:
+            y_z = np.clip(y_z, -1.0, 1.0)
+        out = self._unscale(y_z, self._mu, self._sigma)
         return out if np.ndim(out) > 0 else float(out)
 
     def transform(
@@ -301,7 +322,8 @@ class SASForecaster(BaseForecaster):
         z  = jnp.array(ctx_z)
         s0 = jnp.zeros(self._model.n, dtype=jnp.float32)
         if getattr(self._model.basis_p, 'training_mode', 'parallel') == 'sequential':
-            states, _ = _stream_scan(self._model, s0, z)
+            scan = _fast_seq_scan if hasattr(self._model.basis_p, 'scan_matvec') else _stream_scan
+            states, _ = scan(self._model, s0, z)
         else:
             states, _ = _forward(self._model, z, s0, self.chunk_size)
         return np.asarray(states, dtype=np.float32)

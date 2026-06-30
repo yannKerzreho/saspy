@@ -2,10 +2,58 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import jax.numpy as jnp
 
 VPT_THRESHOLD = 0.4
+
+
+def load_dgp(loader, n: int, *, channels=None, bound: float = 0.95, **loader_kwargs) -> np.ndarray:
+    """Generate `n` steps from a reservoirpy DGP, min-max normalised to [-bound, bound].
+
+    The reservoir lives on the compact domain [-1, 1]; normalising the DGP to its
+    own per-channel range there lets forecasters run with ``scale_input=False``
+    (no internal rescaling) — the single place the convention is applied.
+
+    `bound` defaults to 0.95 (not 1.0) so the training range maps to [-0.95, 0.95]:
+    this leaves head-room for an autonomous rollout (or test data) to wander a
+    little past the train min/max without immediately saturating the [-1, 1] clip.
+
+    Parameters
+    ----------
+    loader  : a ``reservoirpy.datasets`` attribute name (e.g. "lorenz") or any
+              callable ``f(n, **kwargs)`` returning a (T,) or (T, D) array (or a
+              ``(t, series)`` tuple, as some reservoirpy generators do).
+    n       : number of timesteps to generate.
+    channels: optional list of column indices to keep (after generation).
+    bound   : target half-range; data is scaled into [-bound, bound].
+    **loader_kwargs : forwarded to the loader (None values dropped).
+
+    Returns
+    -------
+    (n, D) float64 array with every channel scaled into [-bound, bound].
+    """
+    import reservoirpy.datasets as rpy_datasets
+    fn = getattr(rpy_datasets, loader) if isinstance(loader, str) else loader
+
+    kw = {k: v for k, v in loader_kwargs.items() if v is not None}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = fn(n, **kw)
+    if isinstance(result, tuple):
+        result = result[1]
+    raw = np.asarray(result, dtype=np.float64)
+    if raw.ndim == 1:
+        raw = raw[:, None]
+    if channels is not None:
+        raw = raw[:, channels]
+
+    lo, hi = raw.min(axis=0, keepdims=True), raw.max(axis=0, keepdims=True)
+    center = (lo + hi) / 2.0
+    half   = np.maximum((hi - lo) / 2.0, 1e-12)
+    return bound * (raw - center) / half
 
 
 def autonomous_nrmse(preds: np.ndarray, targets: np.ndarray) -> np.ndarray:

@@ -20,14 +20,7 @@ htmlcov/
 .DS_Store
 .claude/
 
-experiments/
-note/
 
-# Benchmark experiment subdirectories
-benchmarks/clip/
-benchmarks/forecast_mode/
-benchmarks/forecasts/
-benchmarks/jl_projection/
-benchmarks/lorenz_scaling/
-benchmarks/scaling/
-benchmarks/validation/
+experiments/
+experiments_old/
+note/

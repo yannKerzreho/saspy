@@ -147,3 +147,33 @@ def _stream_scan(model, s0, z_seq):
 
     s_last, all_states = jax.lax.scan(body, s0, z_seq)
     return all_states, s_last
+
+
+@jax.jit
+def _fast_seq_scan(model, s0, z_seq):
+    """
+    Fast teacher-forced state-building scan for sequential bases (Sparse, LowRank).
+
+    The transition features and the drive depend only on the *input*, never the
+    state, so under teacher forcing they precompute batched ONCE, leaving the scan
+    to do only the state recurrence via the basis' lean ``scan_matvec`` (which for
+    LowRank stacks [M_0;Vᵀ] into a single row-major GEMV).  Exactly equals
+    ``_stream_scan`` but with the per-step feature/projection work hoisted out.
+
+    Requires basis_p to implement scan_features / scan_prep / scan_matvec.
+    """
+    z_tilde = model.project(z_seq)                          # (T, K)
+    bp      = model.basis_p
+    feat    = bp.scan_features(z_tilde)                     # (T, *feat)
+    q_seq   = model.basis_q.batch_eval_q(z_tilde)          # (T, N)
+    prep    = bp.scan_prep()                                # static per-scan (e.g. W_stack)
+    leak    = model.leak
+
+    def body(s, fq):
+        feat_t, q_t = fq
+        raw = bp.scan_matvec(prep, feat_t, s) + q_t
+        s_new = (1.0 - leak) * s + leak * raw
+        return s_new, s_new
+
+    s_last, all_states = jax.lax.scan(body, s0, (feat, q_seq))
+    return all_states, s_last
