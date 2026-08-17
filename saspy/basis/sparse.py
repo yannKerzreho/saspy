@@ -34,8 +34,8 @@ from .connectivity import log_density, connectivity_mask
 # In ``training_mode == 'sequential'`` the scan only ever needs the *action*
 # A_t @ s, never the dense A_t.  We therefore store the P stack as a single
 # BCOO (F, N, N) and compute the per-feature matvecs with one sparse contraction
-# — exact, with static nnz, no fill-in (see note/sparse_bcoo.md).  This is the
-# only place ``jax.experimental.sparse`` is used: we rely on ``bcoo_dot_general``
+# — exact, with static nnz, no fill-in.  This is the only place
+# ``jax.experimental.sparse`` is used: we rely on ``bcoo_dot_general``
 # (sparse·dense, jittable) and ``BCOO.fromdense`` only — both mature.
 
 def _as_dense(P):
@@ -124,7 +124,7 @@ class SparseP:
         # at conn_floor). The recurrence graph lives in this shared mask, NOT in
         # the per-slice density_P: with independent per-slice masks the union over
         # F slices is near-dense, so density_P controls per-feature parameter count,
-        # not the realised recurrence connectivity. See note/density_design.md.
+        # not the realised recurrence connectivity.
         # Explicit A_density overrides; connectivity=None falls back to density_P.
         self.connectivity = float(connectivity) if connectivity is not None else None
         self.conn_floor   = int(conn_floor)

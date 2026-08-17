@@ -1,6 +1,6 @@
 """Structured connectivity / density generators for the SAS weight tensors.
 
-Implements the density design in `note/density_design.md`:
+Implements the density design:
 
   * `log_density`      — Erdős–Rényi connectivity-threshold density  c·ln(N)/N.
   * `connectivity_mask`— sparse Bernoulli mask with a guaranteed ≥1 per row.

@@ -27,7 +27,7 @@ from .basis.connectivity import sparse_input_matrix
 def build_input_matrix(key, d: int, n_drivers: int, density: float = 1.0,
                        normalize: bool = True, fan_in: int | None = None,
                        banded_halfwidth: int | None = None):
-    """Random (d, n_drivers) projection.  Three strategies (see note/density_design.md):
+    """Random (d, n_drivers) projection.  Three strategies:
 
       * d == 1 : unit gain (±1) — z_tilde = ±z, full [-1,1] range, no saturation.
       * fan_in / banded_halfwidth set : sparse-JL (fixed nonzeros per driver) or

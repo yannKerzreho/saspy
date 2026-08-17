@@ -18,10 +18,10 @@ Two α/β feature modes (× the Cheb/Trig spec):
   R modes via a frozen mixing matrix C.  General (K, R independent).
 * ``alpha_mode='driver'`` (**recommended**) — **K = R**: each mode is one univariate
   feature of its own random projection, ``α_r = T_{d_r}(z̃_r)`` (Cheb, degrees
-  cycled 1..D) or ``cos(ω_r z̃_r + φ_r)`` (Trig).  The Veronese/Waring frame
-  (``note/projection_vs_crossinput.md``): R projection-powers span ``Poly_{≤D}``
-  once ``R ≳ C(d+D, D)``, so growing R *is* growing input coverage.  No monomial
-  enumeration, no C map — drivers = modes = coupling atoms (one width).
+  cycled 1..D) or ``cos(ω_r z̃_r + φ_r)`` (Trig).  In the Veronese/Waring frame,
+  R projection-powers span ``Poly_{≤D}`` once ``R ≳ C(d+D, D)``, so growing R *is*
+  growing input coverage.  No monomial enumeration, no C map — drivers = modes =
+  coupling atoms (one width).
 
 Contractivity (distribution-free).  Orthonormal U,V (R ≤ N) ⇒ singular values of
 ``U diag(α) Vᵀ`` are exactly ``|α_r|``, so

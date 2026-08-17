@@ -69,8 +69,6 @@ models:
       input_scaling: 1.0
     label:  "ESN"
 
-
-## v4
   sparse_c3_n200:
     type: sas
     basis_p: {structure: sparse, n: 200, spectral_norm: 0.9, feature: {kind: cheb, degree: 3, cross_input: true}, connectivity: 1.5}
@@ -92,42 +90,3 @@ models:
     basis_q: {structure: lowrank, n: 300, rank: 128, spectral_norm: 0.9, alpha_mode: driver, density_G: 0.1, feature: {kind: trig, degree: 3, bandwidth: 0.5}}
     label: "LR-T3 r128"
     color: "#00441b"
-
-## v3
-  # lr_c5_n750_r512:
-  #   type: sas
-  #   basis_p: {structure: lowrank, n: 300, rank: 256, spectral_norm: 0.9, alpha_mode: driver, connectivity: 1.5, feature: {kind: cheb, degree: 5}}
-  #   basis_q: {structure: lowrank, n: 300, rank: 256, spectral_norm: 0.9, alpha_mode: driver, density_G: 0.1, feature: {kind: cheb, degree: 5}}
-  #   label: "LR-C5 R512"
-  #   color: "#762a83"
-
-  # lr_c3_n1000_r256:
-  #   type: sas
-  #   basis_p: {structure: lowrank, n: 500, rank: 128, spectral_norm: 0.9, alpha_mode: driver, connectivity: 1.5, feature: {kind: cheb, degree: 5}}
-  #   basis_q: {structure: lowrank, n: 500, rank: 128, spectral_norm: 0.9, alpha_mode: driver, density_G: 0.1, feature: {kind: cheb, degree: 5}}
-  #   label: "LR-C5 R256"
-  #   color: "#762a83"
-
-
-## v2
-  # sparse_c3_n300:
-  #   type: sas
-  #   basis_p: {structure: sparse, n: 500, spectral_norm: 0.9, feature: {kind: cheb, degree: 3, cross_input: true}, connectivity: 1.5}
-  #   basis_q: {structure: sparse, n: 500, spectral_norm: 0.9, feature: {kind: cheb, degree: 3, cross_input: true}, connectivity: 1.5}
-  #   label: "Sp-C3 n500"
-  #   color: "#238b45"
-
-  # lr_c3_n500_r256:
-  #   type: sas
-  #   basis_p: {structure: lowrank, n: 1000, rank: 256, spectral_norm: 0.9, alpha_mode: driver, connectivity: 1.5, feature: {kind: cheb, degree: 3}}
-  #   basis_q: {structure: lowrank, n: 1000, rank: 256, spectral_norm: 0.9, alpha_mode: driver, density_G: 0.1, feature: {kind: cheb, degree: 3}}
-  #   label: "LR-C3 R256"
-  #   color: "#762a83"
-
-  # diag_c3_n1k:
-  #   type: sas
-  #   proj: {density: 0.3, bias: true}
-  #   basis_p: {structure: diagonal, n: 1500, spectral_norm: 0.9, feature: {kind: cheb, degree: 3}}
-  #   basis_q: {structure: diagonal, n: 1500, spectral_norm: 0.9, feature: {kind: cheb, degree: 3}}
-  #   label: "Dg-C3 n1.5k"
-  #   color: "#00441b"

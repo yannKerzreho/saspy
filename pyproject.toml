@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "saspy"
-version = "0.2.0"
-description = "SAS (State Affine Systems) reservoir computing for time-series forecasting"
+version = "0.3.0"
+description = "SAS (State-Affine Systems) reservoir computing for time-series forecasting"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -36,6 +36,11 @@ benchmark = [
     "reservoirpy>=0.3",
     "matplotlib",
     "pyyaml",
+    "tqdm",
+]
+examples = [
+    "matplotlib",
+    "jupyter",
 ]
 
 [tool.hatch.build.targets.wheel]

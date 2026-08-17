@@ -1,4 +1,4 @@
-"""saspy — SAS (Spectral Associative Scan) reservoir forecaster."""
+"""saspy — SAS (State-Affine Systems) reservoir forecaster."""
 
 from .base        import BaseForecaster
 from .basis       import (

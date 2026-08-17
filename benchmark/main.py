@@ -575,9 +575,9 @@ def main() -> None:
     dgps_cfg      = cfg["dgps"]
     models_cfg    = cfg["models"]
 
-    # Benchmark-wide leaky rate for SAS models (default 0.25, matching the ESN's lr).
+    # Benchmark-wide leaky rate for SAS models; a per-model `leak:` key overrides it.
     global _BENCH_LEAK
-    _BENCH_LEAK = float(bench_cfg.get("leak", 0.25))
+    _BENCH_LEAK = float(bench_cfg.get("leak", 1.0))
     dgp_defaults  = {k: v for k, v in dgps_cfg.items() if not isinstance(v, dict)}
     all_dgp_keys  = [k for k, v in dgps_cfg.items() if isinstance(v, dict)]
     active_dgps   = args.dgps   or all_dgp_keys

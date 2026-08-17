@@ -2,8 +2,8 @@
 
 Builds (structure × P-feature × Q-feature) SAS forecasters, evaluates them with
 the benchmark's autonomous rollout (NRMSE / VPT / SWD), prints grouped tables,
-and saves raw per-seed results to JSON.  Experiments under experiments/ supply a
-grid and call run_grid / print_tables / save_json.
+and saves raw per-seed results to JSON.  Callers supply a grid and call
+run_grid / print_tables / save_json.
 
 All models run on [-1,1]-normalised data (scale_input=False, clip_output=True).
 """
