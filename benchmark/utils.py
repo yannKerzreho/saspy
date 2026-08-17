@@ -64,7 +64,7 @@ def autonomous_nrmse(preds: np.ndarray, targets: np.ndarray) -> np.ndarray:
     p     = np.asarray(preds,   dtype=np.float64)
     t     = np.asarray(targets, dtype=np.float64)
     sigma = np.maximum(t.std(axis=0), 1e-8)
-    return np.sqrt(((p - t) / sigma) ** 2).mean(axis=1)
+    return np.sqrt((((p - t) / sigma) ** 2).mean(axis=1))
 
 
 def compute_vpt(nrmse: np.ndarray, threshold: float = VPT_THRESHOLD) -> int:

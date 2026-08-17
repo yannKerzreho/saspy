@@ -80,8 +80,8 @@ Models are evaluated in autonomous rollout mode (the model feeds its own predict
 
 | Metric | Definition | Better |
 |---|---|---|
-| **NRMSE h=10** | Normalised RMSE at horizon 10, averaged over channels (log2 ratio to ESN in plot) | Lower |
-| **VPT** | Steps until NRMSE exceeds 0.4. Reported in Lyapunov times (TL) for chaotic systems | Higher |
+| **NRMSE** | Per-step error — RMS over channels of the residual normalised by each channel's std — averaged over the first 10 rollout steps (log2 ratio to ESN in plot) | Lower |
+| **VPT** | Steps until the per-step NRMSE exceeds 0.4. Reported in Lyapunov times (TL) for chaotic systems | Higher |
 | **SWD** | Sliced Wasserstein Distance between true and predicted attractor, 200 projections (log2 ratio to ESN in plot) | Lower |
 
 The benchmark compares three SAS models against an ESN baseline across nine dynamical systems (Mackey-Glass, MSO-8, Logistic Map, Hénon Map, Lorenz, Rössler, Multiscroll, Doublescroll, Lorenz96-5), on 10 seeded windows each:

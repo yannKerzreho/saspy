@@ -342,7 +342,7 @@ def print_results(all_results: list[dict], models_cfg: dict, active_models: list
     labels = [models_cfg[m]["label"] for m in active_models]
 
     metrics = [
-        ("nrmse_h", "NRMSE h=10  (mean ± std, autonomous rollout)"),
+        ("nrmse_h", "NRMSE  (mean ± std over seeds, first 10 rollout steps)"),
         ("vpt",     "VPT  (mean ± std, ε=0.4)"),
         ("swd",     f"SWD  (mean ± std, diverged seeds excluded, cap={SWD_DIVERGE:.0e})"),
         ("t_train", "Training time  (s, mean ± std, scan + ridge CV)"),
