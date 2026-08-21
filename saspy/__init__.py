@@ -6,7 +6,7 @@ from .basis       import (
     DiagonalP, DiagonalQ,
     BlockP, BlockQ,
     SparseP, SparseQ,
-    LowRankP, LowRankQ,
+    LowRankP, LowRankHullP, LowRankQ,
 )
 from .model       import SASModel, build_input_matrix
 from .engine      import _forward, _step_once, _stream_scan, scan_states  # noqa: F401
@@ -22,7 +22,7 @@ __all__ = [
     "DiagonalP", "DiagonalQ",
     "BlockP", "BlockQ",
     "SparseP", "SparseQ",
-    "LowRankP", "LowRankQ",
+    "LowRankP", "LowRankHullP", "LowRankQ",
     "scan_states",
     "BaseForecaster",
 ]

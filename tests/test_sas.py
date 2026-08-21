@@ -21,11 +21,12 @@ from saspy import (
     DiagonalP, DiagonalQ,
     BlockP, BlockQ,
     SparseP, SparseQ,
-    LowRankP, LowRankQ,
+    LowRankP, LowRankHullP, LowRankQ,
     SASModel, SASForecaster,
-    _forward, _step_once,
+    _forward, _step_once, scan_states,
 )
 from saspy.engine import _stream_scan, _fast_seq_scan
+from saspy.engine import _stream_scan, _fast_seq_scan, _fast_seq_scan
 
 
 @pytest.fixture
@@ -443,6 +444,98 @@ class TestEngine:
         z = _unit(key, (T, 1))
         states, _ = _forward(m, z, jnp.zeros(N), 16)
         assert states.shape == (T, N)
+
+    @pytest.mark.parametrize("kind", ["diag", "block", "sparse"])
+    @pytest.mark.parametrize("B", [1, 7, 32, 256])
+    @pytest.mark.parametrize("inner", ["auto", "seq", "assoc"])
+    def test_scan_equals_sequential_recurrence(self, key, kind, B, inner):
+        """The chunked scan must reproduce the plain recurrence exactly.
+
+        Covers both intra-chunk passes, B > T, and T not a multiple of B — the
+        shape bookkeeping differs between the two passes, so each needs it.
+        """
+        m, d, N = self._model(key, kind)
+        z = _unit(key, (self.T, d))
+        s0 = jnp.zeros(N)
+        ref, ref_last = _stream_scan(m, s0, z)
+        P_seq, Q_seq = m.encode(z)
+        got, got_last = scan_states(P_seq, Q_seq, s0, m.basis_p, B, inner=inner)
+        assert got.shape == (self.T, N)
+        assert jnp.allclose(got, ref, atol=1e-4), float(jnp.max(jnp.abs(got - ref)))
+        assert jnp.allclose(got_last, ref_last, atol=1e-4)
+
+    @staticmethod
+    def _hull_pair(N=48, R=12, d=2, leak=0.9, feature=None, alpha_mode="driver"):
+        """LowRankHullP and the LowRankP(backbone=False) it must reproduce."""
+        f = feature or Cheb(2)
+        K = R if alpha_mode == "driver" else d
+        mk = lambda cls, mode, **kw: SASModel(
+            cls(N, K, feature=f, rank=R, spectral_norm=0.9, alpha_mode=alpha_mode,
+                training_mode=mode, **kw),
+            LowRankQ(N, K, feature=f, rank=R, spectral_norm=0.9, alpha_mode=alpha_mode),
+            d=d, leak=leak)
+        return (mk(LowRankP, "sequential", backbone=False), mk(LowRankHullP, "parallel"), N, d)
+
+    @pytest.mark.parametrize("alpha_mode,leak", [("driver", 0.9), ("map", 1.0)])
+    @pytest.mark.parametrize("B", [1, 5, 32, 512])
+    @pytest.mark.parametrize("inner", ["auto", "seq", "assoc"])
+    def test_hull_scan_equals_dense_lowrank(self, key, alpha_mode, leak, B, inner):
+        """The (c, C) hull scan must reproduce the dense-A_t model exactly."""
+        ref_m, hull_m, N, d = self._hull_pair(leak=leak, alpha_mode=alpha_mode)
+        ref_m, hull_m = ref_m.initialize(key), hull_m.initialize(key)
+        z  = _unit(key, (self.T, d))
+        s0 = jnp.zeros(N)
+        ref, ref_last = _stream_scan(ref_m, s0, z)
+        P, Q = hull_m.encode(z)
+        got, got_last = scan_states(P, Q, s0, hull_m.basis_p, B, inner=inner)
+        assert jnp.allclose(got, ref, atol=1e-4), float(jnp.max(jnp.abs(got - ref)))
+        assert jnp.allclose(got_last, ref_last, atol=1e-4)
+
+    def test_hull_carry_is_R2_not_N2(self, key):
+        ref_m, hull_m, N, d = self._hull_pair()
+        ref_m, hull_m = ref_m.initialize(key), hull_m.initialize(key)
+        z = _unit(key, (self.T, d))
+        hull_sz = sum(x[0].size for x in jax.tree_util.tree_leaves(hull_m.encode(z)[0]))
+        assert hull_sz == hull_m.basis_p.rank ** 2 + 1
+        assert ref_m.encode(z)[0][0].size == N * N
+        assert hull_sz < N * N
+
+    def test_hull_sequential_paths_agree(self, key):
+        """The inherited O(NR) matvec recurrence is the ablation baseline."""
+        ref_m, hull_m, N, d = self._hull_pair()
+        ref_m, hull_m = ref_m.initialize(key), hull_m.initialize(key)
+        z, s0 = _unit(key, (self.T, d)), jnp.zeros(N)
+        ref, _ = _stream_scan(ref_m, s0, z)
+        for states, _ in (_stream_scan(hull_m, s0, z), _fast_seq_scan(hull_m, s0, z)):
+            assert jnp.allclose(states, ref, atol=1e-4)
+
+    def test_hull_rejects_backbone(self):
+        with pytest.raises(ValueError):
+            LowRankHullP(32, 8, rank=8, alpha_mode="driver", backbone=True)
+
+    def test_hull_pytree_roundtrip(self, key):
+        _, hull_m, N, d = self._hull_pair()
+        hull_m = hull_m.initialize(key)
+        z, s0 = _unit(key, (self.T, d)), jnp.zeros(N)
+        st1, _ = _forward(hull_m, z, s0, 8)
+        leaves, treedef = jax.tree_util.tree_flatten(hull_m)
+        st2, _ = _forward(jax.tree_util.tree_unflatten(treedef, leaves), z, s0, 8)
+        assert jnp.allclose(st1, st2)
+
+    def test_inner_auto_follows_carry_size(self, key):
+        """auto picks the sequential pass exactly when the hull is a matrix."""
+        z = _unit(key, (self.T, 1))
+        for kind, expect in [("diag", "assoc"), ("block", "assoc"), ("sparse", "seq")]:
+            m, d, N = self._model(key, kind)
+            P_seq, _ = m.encode(_unit(key, (self.T, d)))
+            ratio = P_seq[0].size / N
+            assert (ratio > 4) == (expect == "seq"), (kind, ratio)
+
+    def test_scan_rejects_unknown_inner(self, key):
+        m, d, N = self._model(key, "diag")
+        P_seq, Q_seq = m.encode(_unit(key, (self.T, d)))
+        with pytest.raises(ValueError):
+            scan_states(P_seq, Q_seq, jnp.zeros(N), m.basis_p, 8, inner="nope")
 
     def test_jit_and_step(self, key):
         m, d, N = self._model(key, "sparse")

@@ -364,6 +364,110 @@ class LowRankP:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# LowRankHullP — the same model, scanned in its closed hull
+# ════════════════════════════════════════════════════════════════════════════
+
+@jax.tree_util.register_pytree_node_class
+class LowRankHullP(LowRankP):
+    """LowRankP with M_0 = 0, scanned as (c, C) instead of as a dense A_t.
+
+    Same transitions as ``LowRankP(backbone=False)`` — only the representation
+    handed to the scan differs.  With no backbone the transitions live in
+
+        A(c, C) = c·I_N + B·U C Vᵀ,     c ∈ R,  C ∈ R^{R×R},
+
+    which is CLOSED under matrix product (G := VᵀU):
+
+        A(c_j,C_j) A(c_i,C_i) = A(c_j c_i,  c_j C_i + c_i C_j + C_j G C_i).
+
+    So the prefix scan can carry (c, C) — R²+1 numbers, composed with two R×R
+    products — where ``LowRankP.combine`` composes dense N×N matrices.  For
+    R ≪ N that is the difference between a scan that fits and one that does not.
+    A dense M_0 would break the closure, hence ``backbone=False`` only.
+
+    Defaults to ``training_mode="parallel"``: the point of this class is the scan.
+    Set ``"sequential"`` to fall back to the inherited O(NR) matvec recurrence,
+    which is the honest ablation baseline (identical states, no hull).
+    """
+
+    def __init__(self, n: int, n_drivers: int, feature=Cheb(degree=2), rank: int = 32,
+                 spectral_norm: float = 0.9, margin: float = 0.95,
+                 connectivity: float | None = 1.5, conn_floor: int = 6,
+                 density_P: float | None = None, training_mode: str = "parallel",
+                 factor_density: float | None = None, alpha_mode: str = "map",
+                 sparse_M0: bool = False, backbone: bool = False,
+                 factor_blocks: int | None = None):
+        if backbone:
+            raise ValueError("LowRankHullP requires backbone=False: a dense M_0 is "
+                             "not in the hull {c·I + U C Vᵀ}, so the scan would "
+                             "densify. Use LowRankP for a backboned model.")
+        super().__init__(n, n_drivers, feature, rank, spectral_norm, margin,
+                         connectivity, conn_floor, density_P, training_mode,
+                         factor_density, alpha_mode, sparse_M0, False, factor_blocks)
+        self.G = None                                   # (R, R) = Vᵀ U, precomputed
+
+    def initialize(self, key) -> "LowRankHullP":
+        base = LowRankP.initialize(self, key)           # U, V, frozen; M_0 is None
+        obj  = LowRankHullP(*self.tree_flatten()[1])
+        obj.U, obj.V, obj.frozen = base.U, base.V, base.frozen
+        obj.G = base.V.T @ base.U
+        return obj
+
+    # ── hull representation: A_t = 0·I + B·U diag(α_t) Vᵀ ─────────────────────
+    # The leak, folded in by SASModel.encode via leaky(), is what makes c ≠ 0.
+
+    def eval_p(self, z_tilde_t):
+        alpha = self._alpha(z_tilde_t)                                  # (R,)
+        return jnp.zeros(()), self.budget * jnp.diag(alpha)             # (), (R,R)
+
+    def batch_eval_p(self, z_tilde):
+        alpha = self._alpha_batch(z_tilde)                              # (T,R)
+        C = self.budget * (alpha[:, :, None] * jnp.eye(self.rank)[None])
+        return jnp.zeros(alpha.shape[0]), C                             # (T,), (T,R,R)
+
+    def leaky(self, P_seq, leak):
+        """(1−leak)·I + leak·A stays in the hull: c ← (1−leak)+leak·c, C ← leak·C."""
+        c, C = P_seq
+        return (1.0 - leak) + leak * c, leak * C
+
+    # ── monoid on (c, C); leading axes broadcast so associative_scan can batch ──
+
+    def apply(self, A, s):
+        c, C = A
+        Vs = jnp.einsum('nr,...n->...r', self.V, s)                     # Vᵀ s
+        CVs = jnp.einsum('...rq,...q->...r', C, Vs)
+        return c[..., None] * s + jnp.einsum('nr,...r->...n', self.U, CVs)
+
+    def combine(self, i, j):
+        (c_i, C_i), b_i = i
+        (c_j, C_j), b_j = j
+        C = (c_j[..., None, None] * C_i + c_i[..., None, None] * C_j
+             + jnp.matmul(jnp.matmul(C_j, self.G), C_i))
+        Vb  = jnp.einsum('nr,...n->...r', self.V, b_i)
+        CVb = jnp.einsum('...rq,...q->...r', C_j, Vb)
+        b   = (c_j[..., None] * b_i
+               + jnp.einsum('nr,...r->...n', self.U, CVb) + b_j)
+        return (c_j * c_i, C), b
+
+    # ── pytree (adds G to the parent's children) ──────────────────────────────
+
+    def tree_flatten(self):
+        children, aux = super().tree_flatten()
+        return (children + (self.G,), aux)
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = cls(*aux)
+        obj.M0, obj.U, obj.V, obj.frozen, obj.G = children
+        return obj
+
+    def __repr__(self):
+        feat = "trig" if self._trig else "cheb"
+        return (f"LowRankHullP(n={self._n}, K={self._n_drivers}, R={self.rank}, "
+                f"{feat}, {self.alpha_mode}, sn={self.spectral_norm}, hull)")
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # LowRankQ
 # ════════════════════════════════════════════════════════════════════════════
 
