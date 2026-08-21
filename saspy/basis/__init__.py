@@ -16,7 +16,7 @@ Pick any P and any Q with any feature:
 from .feature      import Cheb, Trig, monomial_exponents, cheb_basis
 from .scalar       import DiagonalP, DiagonalQ, BlockP, BlockQ
 from .sparse       import SparseP, SparseQ
-from .lowrank      import LowRankP, LowRankQ
+from .lowrank      import LowRankP, LowRankHullP, LowRankQ
 from .connectivity import (
     log_density, connectivity_mask, banded_mask, sparse_input_matrix,
 )
@@ -26,6 +26,6 @@ __all__ = [
     "DiagonalP", "DiagonalQ",
     "BlockP", "BlockQ",
     "SparseP", "SparseQ",
-    "LowRankP", "LowRankQ",
+    "LowRankP", "LowRankHullP", "LowRankQ",
     "log_density", "connectivity_mask", "banded_mask", "sparse_input_matrix",
 ]

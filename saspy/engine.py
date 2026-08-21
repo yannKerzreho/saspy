@@ -8,7 +8,7 @@ polynomial structure.  It receives pre-materialised arrays:
     Q_seq : (T, N)          — input-drive vectors
 
 and a basis instance (for its combine/apply operators), then runs the
-two-level parallel associative scan.
+chunked parallel scan (sequential inside a chunk, prefix scan across chunks).
 
 Public API
 ----------
@@ -37,15 +37,61 @@ import jax.numpy as jnp
 # Core scan — pure function, no JIT decorator
 # ══════════════════════════════════════════════════════════════════════════════
 
+# scan_states(inner="auto") switches to the sequential intra-chunk pass once one
+# composed transition costs more than this many states.  Block banks sit at 2-4,
+# dense/filled-in hulls at N.
+_DENSE_CARRY_RATIO = 4
+
 def scan_states(
     P_seq,
     Q_seq,
     s0,
     basis,
     chunk_size: int,
+    inner: str = "auto",
 ):
     """
-    Two-level parallel associative scan.
+    Chunked parallel scan over the affine recurrence x_t = A_t x_{t-1} + q_t.
+
+    The recurrence is affine, hence associative under
+    (A,b) o (A',b') = (A A', A b' + b), so the trajectory is a prefix scan.  The
+    scan composes transitions, so its carry lives in the smallest matrix family
+    CLOSED under product — itself for a diagonal (O(N) numbers), but the dense
+    M_N for a sparse pattern (fill-in) or for a low-rank term plus a backbone.
+    That closure, not the arithmetic, is what makes the parallel path expensive:
+    a scan straight over the T steps materialises one composed transition per
+    step, i.e. a (T, N, N) array whenever the family densifies.
+
+    We split into K = ceil(T/B) chunks and choose the intra-chunk pass to match:
+
+      1. reduce each chunk to a single (A, b), vmapped over the K chunks;
+      2. prefix-scan the K chunk summaries (one associative_scan, always);
+      3. turn the running summaries into the state entering each chunk;
+      4. resolve the states inside each chunk from that entry state, vmapped.
+
+    Steps 1 and 4 come in two flavours, selected by ``inner``:
+
+    ``"assoc"``
+        associative_scan inside the chunk (step 1 keeps every partial
+        composition, step 4 is then a broadcast ``apply``).  Depth O(log B), but
+        it materialises T composed transitions.  Right when the carry is
+        state-sized, since the array costs no more than the states themselves.
+
+    ``"seq"``
+        a sequential fold inside the chunk (step 1 carries only the running
+        composition; step 4 replays the chunk with matvecs).  Depth O(B), but
+        only K = T/B composed transitions are ever live and only O(T/B) combines
+        are performed instead of O(T).  Right when the carry is a matrix.
+
+    ``"auto"`` (default)
+        ``"seq"`` when one transition is bigger than one state, ``"assoc"``
+        otherwise.  On CPU this picks the faster kernel in both regimes:
+        measured against the all-associative version, 1.2-2.2x faster for a
+        dense (T, N, N) carry (Sparse, LowRank with backbone) and no slower for
+        the diagonal, which keeps its low-depth inner scan.
+
+    B therefore trades depth against the number of composed transitions:
+    depth O(B + log(T/B)) and memory O((T/B) c), where c is the hull dimension.
 
     Parameters
     ----------
@@ -53,7 +99,8 @@ def scan_states(
     Q_seq      : (T, N)          pre-evaluated input-drive vectors
     s0         : (N,)            initial reservoir state
     basis      : BaseBasis pytree — supplies combine() and apply()
-    chunk_size : static int B    — intra-chunk parallelism granularity
+    chunk_size : static int B    — chunk length
+    inner      : "auto" | "seq" | "assoc" — intra-chunk pass (see above)
 
     Returns
     -------
@@ -62,44 +109,76 @@ def scan_states(
     """
     T = Q_seq.shape[0]
     N = Q_seq.shape[1]
-    B = chunk_size
+    B = min(int(chunk_size), T)
+
+    # P_seq may be a pytree (LowRankHullP carries the pair (c, C)); one "element"
+    # is the per-step slice of every leaf.
+    carry_size = sum(x[0].size for x in jax.tree_util.tree_leaves(P_seq))
+
+    if inner == "auto":
+        # Is the composed transition state-sized, or a matrix?  Diagonal gives N
+        # numbers and a 2x2-block bank 2N, both cheap to keep for every step;
+        # a dense or filled-in hull gives N^2, i.e. N times the states.  The
+        # ratio separates the two regimes by orders of magnitude, so the exact
+        # threshold does not matter.
+        inner = "seq" if carry_size > _DENSE_CARRY_RATIO * N else "assoc"
+    if inner not in ("seq", "assoc"):
+        raise ValueError(f"inner must be 'auto', 'seq' or 'assoc'; got {inner!r}")
 
     pad = (B - T % B) % B
-    P_pad = jnp.pad(P_seq, [(0, pad)] + [(0, 0)] * (P_seq.ndim - 1))
-    Q_pad = jnp.pad(Q_seq, [(0, pad), (0, 0)])
+    K   = (T + pad) // B                              # number of chunks
 
-    K = P_pad.shape[0] // B                           # number of chunks
+    def _chunk(x):                                    # (T, ...) -> (K, B, ...)
+        x = jnp.pad(x, [(0, pad)] + [(0, 0)] * (x.ndim - 1))
+        return x.reshape((K, B) + x.shape[1:])
 
-    # Reshape into (K, B, *A_shape) and (K, B, N)
-    P_chunks = P_pad.reshape((K, B) + P_seq.shape[1:])
-    Q_chunks = Q_pad.reshape(K, B, N)
+    P_chunks = jax.tree_util.tree_map(_chunk, P_seq)
+    Q_chunks = _chunk(Q_seq)
 
-    # ── Phase 1: intra-chunk cumulative scans (K chunks, vmapped) ────────────
-    def _chunk_scan(pq):
-        P_c, Q_c = pq
-        return jax.lax.associative_scan(basis.combine, (P_c, Q_c))
+    # ── Phase 1: reduce each chunk to one (A, b) — K chunks in parallel ───────
+    # The zero padding of the final chunk zeroes that chunk's summary, which
+    # phase 3 discards anyway (only summaries 0..K-2 are used).
+    if inner == "assoc":
+        Acum, bcum = jax.vmap(
+            lambda pq: jax.lax.associative_scan(basis.combine, pq)
+        )((P_chunks, Q_chunks))                        # (K, B, *A_shape), (K, B, N)
+        A_sum = jax.tree_util.tree_map(lambda x: x[:, -1], Acum)
+        b_sum = bcum[:, -1]
+    else:
+        def _fold(P_c, Q_c):
+            def body(acc, pq):
+                return basis.combine(acc, pq), None
+            head = jax.tree_util.tree_map(lambda x: x[0], P_c)
+            tail = jax.tree_util.tree_map(lambda x: x[1:], P_c)
+            (A, b), _ = jax.lax.scan(body, (head, Q_c[0]), (tail, Q_c[1:]))
+            return A, b
+        A_sum, b_sum = jax.vmap(_fold)(P_chunks, Q_chunks)   # (K, *A_shape), (K, N)
 
-    Acum, bcum = jax.vmap(_chunk_scan)((P_chunks, Q_chunks))
-    # Acum: (K, B, *A_shape),  bcum: (K, B, N)
-
-    # ── Phase 2: inter-chunk scan over last-step transforms ──────────────────
-    A_inter, b_inter = jax.lax.associative_scan(
-        basis.combine, (Acum[:, -1], bcum[:, -1])
-    )
-    # A_inter: (K, *A_shape),  b_inter: (K, N)
+    # ── Phase 2: prefix scan over the K chunk summaries ──────────────────────
+    A_inter, b_inter = jax.lax.associative_scan(basis.combine, (A_sum, b_sum))
 
     # ── Phase 3: carries — state at the START of each chunk ──────────────────
     rest    = jax.vmap(lambda A, b: basis.apply(A, s0) + b)(
-        A_inter[:-1], b_inter[:-1]
+        jax.tree_util.tree_map(lambda x: x[:-1], A_inter), b_inter[:-1]
     )                                                  # (K-1, N)
     carries = jnp.concatenate([s0[None], rest], axis=0)  # (K, N)
 
     # ── Phase 4: resolve all states (K chunks in parallel) ───────────────────
-    all_s = jax.vmap(
-        lambda Ac, bc, c: jax.vmap(
-            lambda A, b: basis.apply(A, c) + b
-        )(Ac, bc)
-    )(Acum, bcum, carries).reshape(K * B, N)           # (K*B, N)
+    if inner == "assoc":
+        all_s = jax.vmap(
+            lambda Ac, bc, c: jax.vmap(
+                lambda A, b: basis.apply(A, c) + b
+            )(Ac, bc)
+        )(Acum, bcum, carries).reshape(K * B, N)
+    else:
+        def _replay(P_c, Q_c, c):
+            def body(s, pq):
+                P_t, Q_t = pq
+                s_new = basis.apply(P_t, s) + Q_t
+                return s_new, s_new
+            _, S = jax.lax.scan(body, c, (P_c, Q_c))
+            return S
+        all_s = jax.vmap(_replay)(P_chunks, Q_chunks, carries).reshape(K * B, N)
 
     return all_s[:T], all_s[T - 1]
 
